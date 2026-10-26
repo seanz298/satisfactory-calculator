@@ -1,0 +1,964 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>幸福工厂 1.2 · 产线工作台</title>
+    <!--APP_STYLES-->
+  </head>
+  <body>
+    <header class="app-header">
+      <div class="brand">
+        <span class="brand-mark">F</span><strong>幸福工厂</strong>
+      </div>
+      <button
+        id="sidebarToggle"
+        aria-label="折叠或展开导航"
+        aria-expanded="true"
+      >
+        ☰</button
+      ><span class="header-caption" id="pageCaption">产线工作台</span
+      ><span class="version-tag">游戏数据 1.2.3.1</span>
+      <div class="buttons">
+        <button id="fullscreenToggle" title="全屏">全屏</button
+        ><button id="densityToggle" title="切换紧凑布局">紧凑</button
+        ><button id="export">导出配置</button
+        ><button id="import">导入配置</button
+        ><input id="importFile" type="file" accept=".json" hidden /><button
+          id="reset"
+        >
+          清空方案
+        </button>
+      </div>
+    </header>
+    <div id="navShade" class="nav-shade"></div>
+    <nav id="appSidebar" class="sidebar" aria-label="主导航"></nav>
+    <div
+      id="workspaceTabs"
+      class="workspace-tabs"
+      aria-label="已打开页面"
+    ></div>
+    <main>
+      <div id="status" class="status" role="status" aria-live="polite">
+        从空白方案开始。先添加供给或资源点，再添加产物；也可以切换到“从产物反推”。
+      </div>
+      <section id="homeTab" hidden>
+        <div class="home-intro">
+          <div>
+            <div class="home-kicker">SATISFACTORY / FACTORY WORKBENCH</div>
+            <h1>从一条产线，到整座工厂。</h1>
+            <p>规划产量与资源，选择生产配方，核对机器、电力和建设材料。</p>
+            <div class="buttons" style="margin-top: 18px">
+              <button class="primary" data-tab="planner">开始产线规划</button
+              ><button data-tab="worldmap">在地图选择资源</button>
+            </div>
+          </div>
+          <div class="home-icon" aria-hidden="true">◈</div>
+        </div>
+        <div id="homeStats" class="stats"></div>
+        <h2 class="home-section-title">工作台</h2>
+        <div id="homeLinks" class="home-grid"></div>
+        <div class="panel" style="margin-top: 20px">
+          <h2>当前方案</h2>
+          <div id="homePlan"></div>
+          <div class="buttons">
+            <button data-tab="workspace">管理方案与改装</button
+            ><button data-tab="construction">查看建设进度</button>
+          </div>
+        </div>
+      </section>
+      <section id="journalTab" hidden>
+        <div class="panel">
+          <h2>工作台更新记录</h2>
+          <p>本地计算器的功能与界面记录。</p>
+        </div>
+        <div class="panel">
+          <article class="journal-entry">
+            <span class="badge">界面更新</span>
+            <h3>分组导航与图鉴工作台</h3>
+            <ul>
+              <li>左侧分组导航、顶部可关闭页签、首页快捷入口。</li>
+              <li>物品与建筑图鉴，图片卡片、搜索和详情弹窗。</li>
+              <li>里程碑卡片索引，查看建造成本并跳转物资跟踪。</li>
+              <li>地图左侧筛选、快速选择纯净资源和硬盘。</li>
+            </ul>
+          </article>
+          <article class="journal-entry">
+            <h3>阶段物资与思维导图</h3>
+            <p>
+              5 个太空电梯阶段、48 项 HUB
+              任务；库存扣减、产量反推和可折叠思维导图。
+            </p>
+          </article>
+          <article class="journal-entry">
+            <h3>产线与建设规划</h3>
+            <p>
+              替代配方、联动滑条、锁定产量、逐台降频、发电反推、物流瓶颈、建材进度、多方案和改装比较。
+            </p>
+          </article>
+        </div>
+      </section>
+      <section id="plannerTab">
+        <div class="panel">
+          <div class="formgrid">
+            <label
+              >计算方向<select id="mode">
+                <option value="forward">按现有供给分配产物</option>
+                <option value="reverse">从产物反推供给与产线</option>
+                <option value="constrained">单输入约束，其他反推</option>
+              </select></label
+            ><label
+              >生产机器频率上限
+              <div class="numberpair">
+                <input
+                  id="clock"
+                  type="range"
+                  min="1"
+                  max="100"
+                  step="1"
+                  value="100"
+                /><input
+                  id="clockNum"
+                  type="number"
+                  min="1"
+                  max="100"
+                  step="any"
+                  value="100"
+                /><span>%</span>
+              </div></label
+            >
+            <div>
+              <label><input id="over" type="checkbox" /> 允许超频至250%</label>
+              <p class="small">
+                前面的机器按上限运行，只有最后一台降频；不会平均分摊频率。
+              </p>
+            </div>
+          </div>
+          <details>
+            <summary>副产物、季节配方与1.2世界设置</summary>
+            <div class="formgrid" style="margin-top: 14px">
+              <label
+                ><input id="strict" type="checkbox" /> 禁止多余流体外送</label
+              ><label
+                ><input id="event" type="checkbox" checked />
+                启用FICSMAS配方</label
+              ><label
+                >生产耗电倍率<input
+                  id="powerMult"
+                  type="number"
+                  min="0.1"
+                  max="100"
+                  step="any"
+                  value="1"
+              /></label>
+            </div>
+            <p class="small">
+              配方用量按标准世界（×1）计算。暂不模拟随机配方成本倍率；资源点随机化后可直接录入实际资源与纯度。手工、建筑、涂装配方可在全配方库查询，不能当作机器自动生产。
+            </p>
+          </details>
+        </div>
+        <section id="inputConstraintPanel" class="panel" hidden>
+          <h3>单输入约束</h3>
+          <div class="formgrid">
+            <label
+              >搜索约束物料<input
+                id="constraintSearch"
+                type="search"
+                placeholder="例如：原油 / crude oil" /></label
+            ><label>约束物料<select id="constraintItem"></select></label
+            ><label
+              >每分钟总外供上限<input
+                id="constraintAmount"
+                type="number"
+                min="0"
+                max="100000000"
+                step="any"
+            /></label>
+          </div>
+          <div class="buttons" style="margin-top: 12px">
+            <button id="constraintUseSupply">使用该物料现有供给量</button
+            ><button id="constraintFitTargets">按比例适配当前产物</button
+            ><span id="constraintSummary" role="status"></span>
+          </div>
+          <p class="small">
+            仅此物料有上限，其他原料按目标反推；该物料作为外供起点。上限包含资源点供给，不与外部供给重复相加。多个未锁定产物按现有比例缩减，已锁定产量保持不变。点击产物的“优先分配”可计算其最大产量。
+          </p>
+        </section>
+        <div class="layout">
+          <aside>
+            <div class="panel">
+              <h2>01 / 外部供给</h2>
+              <p class="small">
+                原料、液体、中间件都可添加；不能与本方案的最终产物重复。
+              </p>
+              <button class="primary wide side-actions" data-open="supply">
+                ＋ 搜索添加供给
+              </button>
+              <div id="supplies" class="stack"></div>
+            </div>
+            <div class="panel">
+              <h2>02 / 资源点与采集</h2>
+              <p class="small">
+                按资源、纯度、采矿机及频率计算供给，受单机出口输送能力限制。
+              </p>
+              <button class="wide side-actions" data-open="node">
+                ＋ 添加资源点 / 抽水站
+              </button>
+              <div id="nodes" class="stack"></div>
+            </div>
+          </aside>
+          <div>
+            <div id="stats" class="stats"></div>
+            <div class="panel">
+              <div class="toolbar" style="margin-top: 0">
+                <h2 style="margin: 0">03 / 最终产物</h2>
+                <button id="openProductionMind">产线思维导图</button
+                ><button class="primary" data-open="product">
+                  ＋ 搜索添加产物
+                </button>
+              </div>
+              <div class="buttons">
+                <label
+                  ><input id="autoPin" type="checkbox" checked />
+                  自动置顶有产量项</label
+                ><select id="sort" aria-label="产量排序">
+                  <option value="desc">产量从高到低</option>
+                  <option value="asc">产量从低到高</option>
+                  <option value="default">添加顺序</option>
+                </select>
+              </div>
+              <p class="small">
+                拖动滑条每次增减1；输入框可以填小数。锁定产量不会被联动压缩；置顶与锁定独立。资源不足时显示缺少的物料与数量。
+              </p>
+            </div>
+            <p class="small">
+              核电规划：添加“发电量”（MW）、铀废料或钚废料作为目标，燃料与水将自动参与配平；也可直接添加钚／镄燃料棒，让上游核电与废料处理一并展开。发电量为毛发电，净余电另见统计。
+            </p>
+            <div id="products" class="stack"></div>
+            <details
+              class="panel"
+              id="processSettings"
+              style="margin-top: 20px"
+            >
+              <summary><b>工艺配方设置 · 石油与铝</b></summary>
+              <p class="small">
+                与主产线共用供给、最终产物和机器清单。下方可切换中间工序配方。
+              </p>
+              <div class="process-grid" style="margin-top: 16px">
+                <div>
+                  <h3>石油工艺</h3>
+                  <div id="oilChoices" class="stack"></div>
+                </div>
+                <div>
+                  <h3>铝与回流水</h3>
+                  <div id="alChoices" class="stack"></div>
+                </div>
+              </div>
+            </details>
+            <div class="panel" style="margin-top: 20px">
+              <div class="toolbar">
+                <h2>04 / 供给与反推需求</h2>
+                <button id="applyReverse" hidden>将反推需求设为外部供给</button>
+              </div>
+              <div id="balance"></div>
+            </div>
+            <div class="panel">
+              <h2>05 / 机器与逐台频率</h2>
+              <p class="small">
+                例如需要2.3台100%等效机器：2台100%＋1台30%。低于1%的尾机使用1%间歇运行并标出占空比。下拉菜单可切换中间工序配方。支持的生产机器可填写每台索莫晶体数，应用于本配方组全部机器；产出倍增不增加原料，耗电按产出倍率的平方增加，发电机不支持直接放晶体。
+              </p>
+              <div class="tablewrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>配方 / 机器</th>
+                      <th>物料需求与产出 / 分</th>
+                      <th>机器配置</th>
+                      <th>能量碎片</th>
+                      <th>平均 / 峰值 MW</th>
+                      <th>本组建材</th>
+                      <th>建设进度</th>
+                    </tr>
+                  </thead>
+                  <tbody id="machines"></tbody>
+                </table>
+              </div>
+            </div>
+            <section id="machineMaterials">
+              <div class="panel">
+                <div class="toolbar">
+                  <h2>06 / 机器建材统计</h2>
+                  <button id="exportBill">导出建材清单</button>
+                </div>
+                <p>
+                  根据当前产线、资源点和规划发电机组，汇总机器数量与建造材料。
+                </p>
+              </div>
+              <div id="buildStats" class="stats"></div>
+              <div id="bill" class="panel"></div>
+            </section>
+            <div class="panel">
+              <h2>07 / 副产物与回用</h2>
+              <div id="processBalance" style="margin-bottom: 14px"></div>
+              <div id="surplus"></div>
+              <p class="small">
+                多余流体必须实际接到其他产线或包装处理；理论平衡不代替管道扬程、分流与启动库存设计。
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="graphTab" hidden>
+        <div class="panel">
+          <div class="toolbar">
+            <h2>产线连接图</h2>
+            <div class="buttons">
+              <button id="viewNetwork" class="selected">网络图</button
+              ><button id="viewTree">树状图</button
+              ><button id="viewMind">思维导图 · 卡片画布</button
+              ><button id="graphFit">适应画布</button
+              ><button id="graphDetails" aria-pressed="false">
+                显示节点明细</button
+              ><button
+                id="graphFullscreen"
+                class="primary"
+                aria-pressed="false"
+              >
+                全屏画布</button
+              ><button id="downloadGraph">导出SVG</button>
+            </div>
+          </div>
+          <p>
+            边上的数字为每分钟物流量，节点显示机器及频率。循环回路保留连接；树状图中的共享工序仅展开一次。
+          </p>
+          <div id="graphControls" class="buttons">
+            <label
+              >缩放
+              <input
+                id="graphZoom"
+                type="range"
+                min="30"
+                max="150"
+                step="1"
+                value="75"
+                style="width: 170px" /></label
+            ><span class="small"
+              >橙：成品 · 青：外供 · 绿：工序 · 红：余量</span
+            >
+          </div>
+          <div id="graphPreviewLabel" class="notice" hidden></div>
+          <div id="mindControls" hidden>
+            <div class="board-toolbar">
+              <select id="mindProduct" aria-label="按最终产物筛选">
+                <option value="">全部最终产物</option></select
+              ><button id="boardAuto">自动排版</button
+              ><button id="boardFit">适应画布</button
+              ><button id="boardResetFocus">显示全图</button
+              ><button id="mindExpand">展开卡片</button
+              ><button id="mindCollapse">精简卡片</button
+              ><label
+                ><input id="mindSurplus" type="checkbox" checked />
+                副产物</label
+              ><label
+                ><input id="boardLabels" type="checkbox" checked />
+                连线流量</label
+              ><label
+                >缩放
+                <input
+                  id="mindZoom"
+                  type="range"
+                  min="10"
+                  max="150"
+                  step="1"
+                  value="75"
+                /><span id="mindZoomLabel">75%</span></label
+              >
+            </div>
+            <div class="board-caption">
+              <span id="boardCount"></span
+              ><span>拖动卡片排版 · 拖动空白平移 · Ctrl＋滚轮缩放</span>
+            </div>
+            <p class="small">
+              供给 → 机器输入／输出 →
+              目标产物。共享工序只出现一次，虚线为回流连接。卡片数值为全厂本组总量，连线为该支路分配量；连线由主产线自动配平。布局与备注随方案保存。参考
+              <a
+                href="https://github.com/sbancuz/PlanNH"
+                target="_blank"
+                rel="noopener"
+                >PlanNH</a
+              >
+              /
+              <a href="https://gtnhplanner.com" target="_blank" rel="noopener"
+                >GTNH Planner</a
+              >
+              的卡片画布交互。
+            </p>
+          </div>
+          <div id="productionMind" class="graphbox" hidden></div>
+          <div id="network" class="graphbox"></div>
+          <div id="tree" class="tree" hidden></div>
+        </div>
+      </section>
+      <section id="catalogTab" hidden>
+        <div class="panel">
+          <h2>全配方库 / 物品图片对照</h2>
+          <p id="catalogMeta"></p>
+          <div class="formgrid">
+            <label
+              >搜索中文、英文、拼音或首字母<input
+                id="catalogSearch"
+                type="search"
+                placeholder="例如：强化铁板 / qhtb / reinforced" /></label
+            ><label
+              >配方类型<select id="catalogKind">
+                <option value="machine">机器生产配方</option>
+                <option value="alt">替代配方</option>
+                <option value="event">FICSMAS配方</option>
+                <option value="hand">手工制作</option>
+                <option value="build">建筑配方</option>
+                <option value="custom">涂装与自定义</option>
+                <option value="all">全部配方</option>
+              </select></label
+            ><label
+              >显示方式<select id="catalogDisplay">
+                <option value="recipes">配方卡片</option>
+                <option value="items">物品图片对照</option>
+                <option value="buildings">建筑图鉴</option>
+              </select></label
+            >
+          </div>
+          <p class="small">
+            中文名对照 SCIM 与 Satisfactory 数据库；未核实的名称保留英文。
+          </p>
+        </div>
+        <p id="catalogCount" class="small"></p>
+        <div id="catalog" class="cataloggrid"></div>
+        <button id="catalogMore" class="wide" style="margin-top: 14px">
+          显示更多
+        </button>
+      </section>
+
+      <section id="constructionTab" hidden>
+        <div class="panel">
+          <h2>传送带与管道瓶颈</h2>
+          <div class="formgrid">
+            <label
+              >传送带等级<select id="beltCapacity">
+                <option value="60">1级 · 60件/分</option>
+                <option value="120">2级 · 120件/分</option>
+                <option value="270">3级 · 270件/分</option>
+                <option value="480">4级 · 480件/分</option>
+                <option value="780">5级 · 780件/分</option>
+                <option value="1200" selected>6级 · 1200件/分</option>
+              </select></label
+            ><label
+              >管道等级<select id="pipeCapacity">
+                <option value="300">1级 · 300m³/分</option>
+                <option value="600" selected>2级 · 600m³/分</option>
+              </select></label
+            ><label
+              ><input
+                id="allLogistics"
+                type="checkbox"
+              />显示全部物料连接</label
+            >
+          </div>
+          <p id="logisticsStats"></p>
+          <div class="tablewrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>连接</th>
+                  <th>物料</th>
+                  <th>总流量 / 分</th>
+                  <th>单线容量</th>
+                  <th>最少并行线路</th>
+                </tr>
+              </thead>
+              <tbody id="logisticsRows"></tbody>
+            </table>
+          </div>
+          <div id="portWarnings"></div>
+        </div>
+        <div class="panel">
+          <h2>建设顺序</h2>
+          <p>同一步的工序可并行建设；循环工序同组建设，投产前补足启动原料。</p>
+          <div id="buildSequence"></div>
+        </div>
+      </section>
+      <section id="workspaceTab" hidden>
+        <div class="panel">
+          <div class="toolbar">
+            <h2>方案与配置文件</h2>
+            <button id="exportConfig">导出完整配置</button>
+          </div>
+          <div class="formgrid">
+            <label
+              >当前方案名称<input
+                id="activePlanName"
+                maxlength="100"
+                placeholder="例如：钢铁扩建 / 省电改装" /></label
+            ><label
+              >方案类型<select id="activePlanKind">
+                <option value="new">新建方案</option>
+                <option value="retrofit">改装方案</option>
+              </select></label
+            >
+          </div>
+          <p id="activePlanTag"></p>
+          <div class="buttons">
+            <button id="saveNewPlan" class="primary">保存为新方案</button
+            ><button id="updatePlan">更新当前命名方案</button
+            ><button id="restoreDraft">恢复切换前编辑</button>
+          </div>
+          <p id="storageStatus" class="small"></p>
+        </div>
+        <div class="panel">
+          <h2>已有产线基准</h2>
+          <div class="formgrid">
+            <label
+              >已有产线名称<input
+                id="existingName"
+                maxlength="100"
+                placeholder="例如：现有主厂" /></label
+            ><label
+              >记录范围<select id="existingScope">
+                <option value="all">当前产线全部机器</option>
+                <option value="built">仅已标记建成的机器</option>
+              </select></label
+            >
+            <div>
+              <button id="recordExisting">记录当前产线为已有基准</button>
+            </div>
+          </div>
+          <div id="existingSummary"></div>
+        </div>
+        <div class="panel">
+          <h2>已保存方案</h2>
+          <div id="plansList"></div>
+        </div>
+        <div class="panel" id="planCompareSection">
+          <div class="toolbar">
+            <h2>与当前方案对比</h2>
+            <select id="planCompareChoice" aria-label="对比方案"></select>
+          </div>
+          <div id="planComparison"></div>
+        </div>
+        <div class="panel">
+          <h2>已有产线 → 当前方案：改装清单</h2>
+          <div id="retrofitReport"></div>
+        </div>
+      </section>
+      <section id="worldmapTab" hidden>
+        <div class="panel">
+          <div class="toolbar">
+            <h2>世界地图 / 资源与工厂规划</h2>
+            <span id="mapCounts" class="small"></span>
+          </div>
+          <div class="map-filters">
+            <label
+              >搜索资源、拼音或点位编号<input
+                id="mapSearch"
+                type="search"
+                placeholder="铁矿石 / tiekuangshi / iron" /></label
+            ><label
+              >点位类型<select id="mapKind">
+                <option value="all">全部类型</option>
+                <option value="node">矿点</option>
+                <option value="well">资源井</option>
+                <option value="geyser">间歇泉</option>
+              </select></label
+            ><label
+              >最低高度 m<input
+                id="mapMinZ"
+                type="number"
+                value="-1000"
+                step="any" /></label
+            ><label
+              >最高高度 m<input
+                id="mapMaxZ"
+                type="number"
+                value="1000"
+                step="any"
+            /></label>
+          </div>
+          <details class="map-layers" open>
+            <summary>资源图层</summary>
+            <div id="mapResourceFilters" class="map-checks"></div>
+            <div class="buttons">
+              <label
+                ><input type="checkbox" data-map-purity="impure" checked />贫瘠
+                <span style="color: #cf4b45">●</span></label
+              ><label
+                ><input type="checkbox" data-map-purity="normal" checked />普通
+                <span style="color: #e59b28">●</span></label
+              ><label
+                ><input type="checkbox" data-map-purity="pure" checked />纯净
+                <span style="color: #27853b">●</span></label
+              ><button id="mapAllResources">全部资源</button
+              ><button id="mapNoLayers">清空图层</button>
+            </div>
+          </details>
+          <details class="map-layers">
+            <summary>硬盘、能量蛞蝓与外星物品</summary>
+            <div id="mapPoiFilters" class="map-checks"></div>
+          </details>
+          <div class="buttons">
+            <label
+              ><input id="map-terrain" type="checkbox" checked />地形底图</label
+            ><label><input id="map-grid" type="checkbox" />坐标网格</label
+            ><label
+              ><input
+                id="map-baseline"
+                type="checkbox"
+                checked
+              />已有产线标记</label
+            ><label
+              ><input id="map-hideUsed" type="checkbox" />隐藏已使用点</label
+            ><label
+              ><input
+                id="map-hideCollected"
+                type="checkbox"
+                checked
+              />隐藏已收集物品</label
+            >
+          </div>
+        </div>
+        <div class="map-layout">
+          <div class="panel map-panel">
+            <div class="map-tools">
+              <div class="buttons">
+                <button id="mapZoomIn" aria-label="放大地图">＋</button
+                ><button id="mapZoomOut" aria-label="缩小地图">−</button
+                ><button id="mapFit">全图</button
+                ><span id="mapZoomValue">1×</span
+                ><select id="mapMode" aria-label="地图操作模式">
+                  <option value="browse">查看 / 拖动</option>
+                  <option value="pin">标记工厂</option>
+                  <option value="measure">直线测距</option></select
+                ><button id="mapClearMeasure">清除测距</button>
+              </div>
+              <div class="buttons">
+                <input
+                  id="mapGoX"
+                  type="number"
+                  step="any"
+                  placeholder="X / m"
+                  aria-label="定位X坐标"
+                /><input
+                  id="mapGoY"
+                  type="number"
+                  step="any"
+                  placeholder="Y / m"
+                  aria-label="定位Y坐标"
+                /><button id="mapGo">定位</button>
+              </div>
+            </div>
+            <div class="map-canvas-wrap">
+              <canvas
+                id="worldCanvas"
+                tabindex="0"
+                aria-label="幸福工厂世界地图：拖动平移、滚轮或双指缩放，点击点位查看供给；方向键平移，正负键缩放，Home全图。"
+              ></canvas
+              ><span class="map-north">↑ 北</span>
+            </div>
+            <div class="map-footer">
+              <span id="mapCursor">X / Y 坐标单位：米</span
+              ><span id="mapDistance">点击两点测距</span>
+            </div>
+            <p class="small">
+              滚轮 / 双指缩放 · 拖动平移 · 黑边✓表示已加入当前供给
+            </p>
+          </div>
+          <aside class="map-sidebar">
+            <div class="panel" id="mapDetail">
+              <p>点击地图点位查看详情。</p>
+            </div>
+            <details class="panel" open>
+              <summary>当前视野点位（最近60处）</summary>
+              <div id="mapNodeList"></div>
+            </details>
+          </aside>
+        </div>
+        <details class="panel source">
+          <summary>地图数据与坐标</summary>
+          <p>
+            内置459个矿点、118个资源井卫星点、31个间歇泉，另有硬盘、蛞蝓与外星物品。地图为静态世界规划图；当前没有加载游戏存档。
+          </p>
+          <p>
+            资源点使用SCIM公开快照（Build
+            373718），608个采集／地热点的编号、纯度及坐标与独立资源点数据交叉核对。配方数据仍为1.2.3.1。随机资源世界或模组地图需按游戏实际位置核对。
+          </p>
+          <p>
+            <a
+              href="https://satisfactory-calculator.com/zh/interactive-map"
+              target="_blank"
+              rel="noopener"
+              >SCIM参考地图</a
+            >
+            ·
+            <a
+              href="https://github.com/Tjark-Kuehl/satisfactorymap"
+              target="_blank"
+              rel="noopener"
+              >底图与点位快照</a
+            >
+            ·
+            <a
+              href="https://github.com/rockfactory/satisfactory-logistics"
+              target="_blank"
+              rel="noopener"
+              >资源点交叉对照</a
+            >。地形图版权归Coffee Stain Studios。
+          </p>
+        </details>
+      </section>
+      <details class="panel source">
+        <summary>数据版本、配方覆盖与计算规则</summary>
+        <p id="dataMeta"></p>
+        <p>
+          所有机器配方均保留，包括替代配方与FICSMAS；完整目录同时保留手工、建筑和涂装配方。自动产线仅采用机器配方，采集独立配置，发电燃料消耗与副产物已作为补充配方接入主产线。各物品启用所选配方，不自动遍历所有替代配方。配方解锁和季节条件由玩家核对。
+        </p>
+        <p>
+          按连续物料平衡求解，包含副产物和循环；反推以最少外供总量为目标，数量单位不同，因此不是稀缺资源价值的全局最优。网络图显示物料连接方案，不是游戏内坐标布局或可放置蓝图。电力为规划估算，不读取存档。
+        </p>
+        <p>
+          <a
+            href="https://github.com/0xjc/SatisfactoryLP"
+            target="_blank"
+            rel="noopener"
+            >1.2.3.1游戏Docs来源</a
+          >
+          ·
+          <a
+            href="https://satisfactory-calculator.com/zh/items"
+            target="_blank"
+            rel="noopener"
+            >中文物品对照</a
+          >
+          ·
+          <a
+            href="https://satisfactory.th.gl/zh-CN/db/schematics"
+            target="_blank"
+            rel="noopener"
+            >替代配方中文对照</a
+          >
+          ·
+          <a
+            href="https://github.com/greeny/SatisfactoryTools"
+            target="_blank"
+            rel="noopener"
+            >游戏图标镜像</a
+          >。游戏资源版权归Coffee Stain Studios。非官方工具。
+        </p>
+      </details>
+      <footer>FACTORY WORKBENCH / 固体件/分 · 流体m³/分 · 本地保存方案</footer>
+      <section id="railTab" hidden></section>
+      <section id="progressTab" hidden>
+        <details id="milestoneGalleryPanel" class="panel" open>
+          <summary><b>里程碑图鉴 / 按层级查找</b></summary>
+          <div class="gallery-toolbar" style="margin-top: 15px">
+            <input
+              id="milestoneSearch"
+              type="search"
+              placeholder="搜索里程碑、物资名称或英文"
+            /><select id="milestoneTier">
+              <option value="all">全部层级</option>
+              <option value="0">Tier 0</option>
+              <option value="1">Tier 1</option>
+              <option value="2">Tier 2</option>
+              <option value="3">Tier 3</option>
+              <option value="4">Tier 4</option>
+              <option value="5">Tier 5</option>
+              <option value="6">Tier 6</option>
+              <option value="7">Tier 7</option>
+              <option value="8">Tier 8</option>
+              <option value="9">Tier 9</option>
+            </select>
+          </div>
+          <div id="milestoneGallery" class="milestone-grid"></div>
+          <div class="data-pagination">
+            <button id="milestonePrev">上一页</button
+            ><span id="milestonePage"></span
+            ><button id="milestoneNext">下一页</button>
+          </div>
+        </details>
+        <div class="panel">
+          <h2>阶段物资与太空电梯</h2>
+          <div class="formgrid">
+            <label
+              >任务类别<select id="progressKind">
+                <option value="elevator">太空电梯</option>
+                <option value="hub">HUB 里程碑</option>
+              </select></label
+            ><label id="progressTierWrap"
+              >HUB 层级<select id="progressTier">
+                <option value="0">层级 0</option>
+                <option value="1">层级 1</option>
+                <option value="2">层级 2</option>
+                <option value="3">层级 3</option>
+                <option value="4">层级 4</option>
+                <option value="5">层级 5</option>
+                <option value="6">层级 6</option>
+                <option value="7">层级 7</option>
+                <option value="8">层级 8</option>
+                <option value="9">层级 9</option>
+              </select></label
+            ><label>当前任务<select id="progressTask"></select></label
+            ><label
+              >物资需求倍率<input
+                id="progressMultiplier"
+                type="number"
+                min="0.01"
+                max="100"
+                step="any" /></label
+            ><label
+              >计划完成时间 / 分钟<input
+                id="progressMinutes"
+                type="number"
+                min="1"
+                max="1000000"
+                step="any"
+            /></label>
+          </div>
+          <p class="small">
+            需求为一次性交付总数；产线规划单位为每分钟。库存填写尚未提交的可用数量。物资倍率按游戏设置填写。
+          </p>
+          <div id="phaseCards" class="buttons"></div>
+        </div>
+        <div class="panel">
+          <div class="toolbar">
+            <h3 id="progressTitle"></h3>
+            <button id="progressPlan" class="primary">
+              将剩余物资加入反推规划
+            </button>
+          </div>
+          <div id="progressNotice" class="notice"></div>
+          <div id="progressTable" class="tablewrap"></div>
+          <p id="progressMessage" role="status"></p>
+        </div>
+        <div class="panel">
+          <div class="toolbar">
+            <h3>阶段思维导图</h3>
+            <label
+              >上游深度
+              <select id="progressDepth">
+                <option value="0">仅阶段物品</option>
+                <option value="1">1 层配方</option>
+                <option value="2">2 层配方</option>
+                <option value="3">3 层配方</option>
+              </select></label
+            ><label
+              >缩放
+              <input
+                id="progressZoom"
+                type="range"
+                min="50"
+                max="150"
+                value="100"
+                step="10" /></label
+            ><button id="progressExpand">全部展开</button
+            ><button id="progressSvg">导出 SVG</button>
+          </div>
+          <p class="small">
+            点击 ＋ / −
+            展开或收起分支；点击物品查看详情并选择加入规划。图中原料按所选配方展开，不跨分支扣抵副产物；净供给和回流以产线反推结果为准。
+          </p>
+          <div
+            id="progressMap"
+            style="overflow: auto; max-height: 720px; border: 1px solid #d8e0e3"
+          ></div>
+        </div>
+        <details class="panel">
+          <summary>数据来源</summary>
+          <p>
+            HUB 物资来自内置 1.2.3.1 游戏数据；太空电梯使用标准 1
+            倍阶段交付表，可调整倍率。
+          </p>
+          <a
+            href="https://satisfactory.wiki.gg/wiki/Space_Elevator"
+            target="_blank"
+            rel="noopener"
+            >太空电梯 Wiki</a
+          >
+        </details>
+      </section>
+      <dialog id="progressDialog">
+        <h3 id="progressDialogTitle"></h3>
+        <div id="progressDialogBody"></div>
+        <div class="buttons">
+          <button id="progressDialogAdd">加入反推规划</button
+          ><button id="progressDialogClose">关闭</button>
+        </div>
+      </dialog>
+      <dialog id="referenceDialog" class="reference-dialog">
+        <button class="dialog-close" id="referenceClose" aria-label="关闭详情">
+          ×
+        </button>
+        <div id="referenceDetail"></div>
+      </dialog>
+    </main>
+    <dialog id="picker">
+      <div class="top">
+        <h2 id="pickerTitle">添加物品</h2>
+        <button id="closePicker" aria-label="关闭">关闭</button>
+      </div>
+      <input
+        id="pickerSearch"
+        type="search"
+        placeholder="搜索中文、英文、全拼、拼音首字母…"
+        aria-label="搜索待添加物品"
+      />
+      <p class="small" id="pickerHint"></p>
+      <div id="pickerResults" class="resultlist"></div>
+    </dialog>
+    <dialog id="compareDialog" class="wide-dialog">
+      <div class="top">
+        <h2 id="compareTitle">配方对比</h2>
+        <button id="closeComparison">取消</button>
+      </div>
+      <label>候选配方<select id="compareChoice"></select></label>
+      <div id="compareBody"></div>
+      <button id="applyComparison" class="primary">应用候选配方</button>
+    </dialog>
+    <dialog id="missingDialog" class="wide-dialog">
+      <div class="top">
+        <h2>缺料详情与供给选择</h2>
+        <button id="closeMissing">暂不添加</button>
+      </div>
+      <div id="missingBody"></div>
+      <p id="missingMessage" class="over"></p>
+      <div class="buttons">
+        <button id="missingGraph">在网络图定位</button
+        ><button id="addSelectedMissing" class="primary">添加所选供给</button>
+      </div>
+    </dialog>
+
+    <dialog id="mapPinDialog" class="wide-dialog">
+      <div class="top">
+        <h2>工厂标记</h2>
+        <button id="mapCancelPin">取消</button>
+      </div>
+      <div class="formgrid">
+        <label>名称<input id="mapPinName" maxlength="100" /></label
+        ><label
+          >类型<select id="mapPinKind">
+            <option value="planned">规划工厂</option>
+            <option value="existing">已有工厂</option>
+            <option value="note">普通标记</option>
+          </select></label
+        ><label>X / m<input id="mapPinX" type="number" step="any" /></label
+        ><label>Y / m<input id="mapPinY" type="number" step="any" /></label>
+      </div>
+      <label
+        >备注<input id="mapPinNote" maxlength="500" style="width: 100%"
+      /></label>
+      <div class="buttons" style="margin-top: 16px">
+        <button id="mapSavePin" class="primary">保存标记</button
+        ><button id="mapDeletePin" hidden>删除标记</button>
+      </div>
+    </dialog>
+    <!--SOLVER--><!--APP_CODE--><!--BOOTSTRAP-->
+  </body>
+</html>
