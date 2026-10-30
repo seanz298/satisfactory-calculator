@@ -1,0 +1,7 @@
+preview/
+.openai/
+tests/generated-*.json
+tests/failed-scenario.json
+__pycache__/
+dist/
+node_modules/

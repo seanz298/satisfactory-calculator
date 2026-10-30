@@ -22,9 +22,9 @@
       <div class="buttons">
         <button id="fullscreenToggle" title="全屏">全屏</button
         ><button id="densityToggle" title="切换紧凑布局">紧凑</button
-        ><button id="export">导出配置</button
-        ><button id="import">导入配置</button
-        ><input id="importFile" type="file" accept=".json" hidden /><button
+        ><button id="export">导出当前方案</button
+        ><button id="import">导入并合并</button
+        ><input id="importFile" type="file" accept=".json" multiple hidden /><button
           id="reset"
         >
           清空方案
@@ -70,6 +70,7 @@
       <section id="journalTab" hidden>
         <div class="panel">
           <h2>工作台更新记录</h2>
+          <article class="journal-entry"><h3>本地最大回收点数与已解锁配方</h3><p>设置新增替代配方选择页。支持地图纯度、频率、晶体预算、预留电力、增幅器比较和后台计算；预览后保存成一个完整机器分组方案。</p></article>
           <p>本地计算器的功能与界面记录。</p>
         </div>
         <div class="panel">
@@ -129,9 +130,7 @@
             >
             <div>
               <label><input id="over" type="checkbox" /> 允许超频至250%</label>
-              <p class="small">
-                前面的机器按上限运行，只有最后一台降频；不会平均分摊频率。
-              </p>
+
             </div>
           </div>
           <details>
@@ -152,9 +151,7 @@
                   value="1"
               /></label>
             </div>
-            <p class="small">
-              配方用量按标准世界（×1）计算。暂不模拟随机配方成本倍率；资源点随机化后可直接录入实际资源与纯度。手工、建筑、涂装配方可在全配方库查询，不能当作机器自动生产。
-            </p>
+
           </details>
         </div>
         <section id="inputConstraintPanel" class="panel" hidden>
@@ -180,17 +177,13 @@
             ><button id="constraintFitTargets">按比例适配当前产物</button
             ><span id="constraintSummary" role="status"></span>
           </div>
-          <p class="small">
-            仅此物料有上限，其他原料按目标反推；该物料作为外供起点。上限包含资源点供给，不与外部供给重复相加。多个未锁定产物按现有比例缩减，已锁定产量保持不变。点击产物的“优先分配”可计算其最大产量。
-          </p>
+
         </section>
         <div class="layout">
           <aside>
             <div class="panel">
               <h2>01 / 外部供给</h2>
-              <p class="small">
-                原料、液体、中间件都可添加；不能与本方案的最终产物重复。
-              </p>
+
               <button class="primary wide side-actions" data-open="supply">
                 ＋ 搜索添加供给
               </button>
@@ -198,9 +191,7 @@
             </div>
             <div class="panel">
               <h2>02 / 资源点与采集</h2>
-              <p class="small">
-                按资源、纯度、采矿机及频率计算供给，受单机出口输送能力限制。
-              </p>
+
               <button class="wide side-actions" data-open="node">
                 ＋ 添加资源点 / 抽水站
               </button>
@@ -227,13 +218,9 @@
                   <option value="default">添加顺序</option>
                 </select>
               </div>
-              <p class="small">
-                拖动滑条每次增减1；输入框可以填小数。锁定产量不会被联动压缩；置顶与锁定独立。资源不足时显示缺少的物料与数量。
-              </p>
+
             </div>
-            <p class="small">
-              核电规划：添加“发电量”（MW）、铀废料或钚废料作为目标，燃料与水将自动参与配平；也可直接添加钚／镄燃料棒，让上游核电与废料处理一并展开。发电量为毛发电，净余电另见统计。
-            </p>
+
             <div id="products" class="stack"></div>
             <details
               class="panel"
@@ -241,9 +228,7 @@
               style="margin-top: 20px"
             >
               <summary><b>工艺配方设置 · 石油与铝</b></summary>
-              <p class="small">
-                与主产线共用供给、最终产物和机器清单。下方可切换中间工序配方。
-              </p>
+
               <div class="process-grid" style="margin-top: 16px">
                 <div>
                   <h3>石油工艺</h3>
@@ -264,9 +249,7 @@
             </div>
             <div class="panel">
               <h2>05 / 机器与逐台频率</h2>
-              <p class="small">
-                例如需要2.3台100%等效机器：2台100%＋1台30%。低于1%的尾机使用1%间歇运行并标出占空比。下拉菜单可切换中间工序配方。支持的生产机器可填写每台索莫晶体数，应用于本配方组全部机器；产出倍增不增加原料，耗电按产出倍率的平方增加，发电机不支持直接放晶体。
-              </p>
+
               <div class="tablewrap">
                 <table>
                   <thead>
@@ -301,9 +284,7 @@
               <h2>07 / 副产物与回用</h2>
               <div id="processBalance" style="margin-bottom: 14px"></div>
               <div id="surplus"></div>
-              <p class="small">
-                多余流体必须实际接到其他产线或包装处理；理论平衡不代替管道扬程、分流与启动库存设计。
-              </p>
+
             </div>
           </div>
         </div>
@@ -379,21 +360,7 @@
               <span id="boardCount"></span
               ><span>拖动卡片排版 · 拖动空白平移 · Ctrl＋滚轮缩放</span>
             </div>
-            <p class="small">
-              供给 → 机器输入／输出 →
-              目标产物。共享工序只出现一次，虚线为回流连接。卡片数值为全厂本组总量，连线为该支路分配量；连线由主产线自动配平。布局与备注随方案保存。参考
-              <a
-                href="https://github.com/sbancuz/PlanNH"
-                target="_blank"
-                rel="noopener"
-                >PlanNH</a
-              >
-              /
-              <a href="https://gtnhplanner.com" target="_blank" rel="noopener"
-                >GTNH Planner</a
-              >
-              的卡片画布交互。
-            </p>
+
           </div>
           <div id="productionMind" class="graphbox" hidden></div>
           <div id="network" class="graphbox"></div>
@@ -428,9 +395,7 @@
               </select></label
             >
           </div>
-          <p class="small">
-            中文名对照 SCIM 与 Satisfactory 数据库；未核实的名称保留英文。
-          </p>
+
         </div>
         <p id="catalogCount" class="small"></p>
         <div id="catalog" class="cataloggrid"></div>
@@ -491,7 +456,7 @@
         <div class="panel">
           <div class="toolbar">
             <h2>方案与配置文件</h2>
-            <button id="exportConfig">导出完整配置</button>
+            <button id="exportConfig">导出当前方案</button>
           </div>
           <div class="formgrid">
             <label
@@ -512,7 +477,7 @@
             ><button id="updatePlan">更新当前命名方案</button
             ><button id="restoreDraft">恢复切换前编辑</button>
           </div>
-          <p id="storageStatus" class="small"></p>
+          <p id="storageStatus"></p>
         </div>
         <div class="panel">
           <h2>已有产线基准</h2>
@@ -667,9 +632,7 @@
               <span id="mapCursor">X / Y 坐标单位：米</span
               ><span id="mapDistance">点击两点测距</span>
             </div>
-            <p class="small">
-              滚轮 / 双指缩放 · 拖动平移 · 黑边✓表示已加入当前供给
-            </p>
+
           </div>
           <aside class="map-sidebar">
             <div class="panel" id="mapDetail">
@@ -822,9 +785,7 @@
                 step="any"
             /></label>
           </div>
-          <p class="small">
-            需求为一次性交付总数；产线规划单位为每分钟。库存填写尚未提交的可用数量。物资倍率按游戏设置填写。
-          </p>
+
           <div id="phaseCards" class="buttons"></div>
         </div>
         <div class="panel">
@@ -861,10 +822,7 @@
             ><button id="progressExpand">全部展开</button
             ><button id="progressSvg">导出 SVG</button>
           </div>
-          <p class="small">
-            点击 ＋ / −
-            展开或收起分支；点击物品查看详情并选择加入规划。图中原料按所选配方展开，不跨分支扣抵副产物；净供给和回流以产线反推结果为准。
-          </p>
+
           <div
             id="progressMap"
             style="overflow: auto; max-height: 720px; border: 1px solid #d8e0e3"
@@ -910,7 +868,6 @@
         placeholder="搜索中文、英文、全拼、拼音首字母…"
         aria-label="搜索待添加物品"
       />
-      <p class="small" id="pickerHint"></p>
       <div id="pickerResults" class="resultlist"></div>
     </dialog>
     <dialog id="compareDialog" class="wide-dialog">

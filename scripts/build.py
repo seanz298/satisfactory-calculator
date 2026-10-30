@@ -6,10 +6,11 @@ import gzip
 import json
 
 ROOT = Path(__file__).resolve().parents[1]
-DATA_KEYS = ('translations', 'data', 'icons', 'map', 'terrain')
+DATA_KEYS = ('translations', 'data', 'icons', 'map', 'terrain', 'optimization')
 
 def build():
     bundle = {key: json.loads((ROOT / 'data' / f'{key}.json').read_text(encoding='utf-8')) for key in DATA_KEYS}
+    bundle['optimizerRuntime'] = {'loader': (ROOT / 'vendor/highs/highs.js').read_text(), 'wasm': base64.b64encode((ROOT / 'vendor/highs/highs.wasm').read_bytes()).decode('ascii'), 'core': (ROOT / 'src/optimizer-core.js').read_text()}
     payload = json.dumps(bundle, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
     encoded = base64.b64encode(gzip.compress(payload, compresslevel=9, mtime=0)).decode('ascii')
     read = lambda name: (ROOT / 'src' / name).read_text(encoding='utf-8')
@@ -19,7 +20,7 @@ def build():
     pieces = {
         '<!--APP_STYLES-->': '<style>\n' + read('styles.css') + '\n</style>',
         '<!--SOLVER-->': '<script>\n' + read('solver.js') + '\n</script>',
-        '<!--APP_CODE-->': '<script id="factorySource" type="text/plain">\n' + read('app.js') + '\n</script>',
+        '<!--APP_CODE-->': '<script id="factorySource" type="text/plain">\n' + (read('plan-files.js') + '\n' + read('optimizer-core.js') + '\n' + read('app.js') + '\n' + read('optimizer-ui.js')) + '\n</script>',
         '<!--BOOTSTRAP-->': '<script>\n' + bootstrap.replace('__BUNDLE_BASE64__', encoded) + '\n</script>',
     }
     html = read('template.html')

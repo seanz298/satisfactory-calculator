@@ -2419,3 +2419,32 @@ html[lang="en"] .board-caption {
 .machine-input-line small {
   color: var(--muted);
 }
+
+/* Recipe details stay visible even if the full comparison is infeasible. */
+.compare-recipes { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin: 14px 0; }
+.compare-recipe { min-width: 0; border: 1px solid var(--line); border-radius: 8px; padding: 16px; background: #fff; }
+.compare-recipe-title small { color: var(--muted); }
+.compare-recipe-title h3 { margin: 4px 0 14px; font-size: 16px; }
+.compare-recipe-basis { display: block; color: var(--muted); margin-top: 3px; }
+.compare-material-block { border-top: 1px solid var(--line); margin-top: 14px; padding-top: 10px; }
+.compare-material-block h4 { margin: 0 0 8px; color: var(--muted); font-size: 12px; }
+.compare-material { display: flex; align-items: center; gap: 7px; margin: 7px 0; flex-wrap: wrap; }
+.compare-material > span { flex: 1; min-width: 75px; overflow-wrap: anywhere; }
+.compare-material > small { color: var(--muted); }
+@media (max-width: 680px) { .compare-recipes { grid-template-columns: 1fr; } }
+
+/* Optimizer settings follow the calculator's existing controls and colors. */
+.settings-subnav,.optimizer-actions{display:flex;gap:10px;flex-wrap:wrap;margin:16px 0}
+.optimizer-fields{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px;margin:16px 0}
+.optimizer-fields label{display:flex;flex-direction:column;gap:6px}
+.optimizer-fields input,.optimizer-fields select{width:100%;box-sizing:border-box}
+.owned-alternates-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:10px}
+.owned-alt{display:flex;align-items:flex-start;gap:10px;border:1px solid var(--line);border-radius:8px;padding:12px}
+.owned-alt input{flex-shrink:0;margin-top:4px}
+.owned-alt small{display:block;color:var(--muted);margin-top:5px}
+.optimizer-summary{display:grid;gap:8px;padding:18px;background:var(--bg);border:1px solid var(--line);border-radius:10px;margin:16px 0}
+.optimizer-summary>b{font-size:1.4rem}
+.optimizer-panel table{width:100%}
+.optimizer-panel [hidden],#settingsGeneralPage[hidden],#settingsAlternatesPage[hidden]{display:none!important}
+#optimizationPlanSummary{margin-bottom:20px}
+@media(max-width:540px){.optimizer-fields,.owned-alternates-list{grid-template-columns:minmax(0,1fr)}.optimizer-actions>*{flex:1 1 auto}}

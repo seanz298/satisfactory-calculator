@@ -45,8 +45,11 @@ function fresh() {
     event: true,
     mode: "forward",
     sloops: {},
+    machineGroups: {},
+    machineGroupsEnabled: false,
     machineClocks: {},
     inputConstraint: { id: "Desc_LiquidOil_C", q: 300 },
+    geothermal: { impure: 0, normal: 0, pure: 0 },
     generators: [],
     genWater: 0,
     extraLoad: 0,
@@ -58,8 +61,15 @@ function fresh() {
   };
 }
 let state = fresh();
+// Session-local history includes the plan and workspace operations, not game data.
+let undoReady = false, undoApplying = false, undoCurrent = '', undoStack = [], redoStack = [];
+let undoEventGroup = '', undoPreviousGroup = '', undoPreviousTime = 0;
 const amount = (x) => Math.max(0, Math.min(1e8, Number(x) || 0));
 // Remove arithmetic noise only at the boundary where computed quantities become inputs.
+function displayNumber(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? Number(n.toFixed(3)) : 0;
+}
 function cleanComputedQuantity(value) {
   const n = Number(value);
   if (!Number.isFinite(n)) return 0;
@@ -72,8 +82,7 @@ function reverseSupplyBudget(plan, s = state) {
     nodePool[n.item] = (nodePool[n.item] || 0) + nodeOutput(n).output;
   return Object.entries(plan.external)
     .filter(
-      ([id, q]) =>
-        q > (nodePool[id] || 0) + EPS && !s.products.some((p) => p.id === id),
+      ([id, q]) => q > (nodePool[id] || 0) + EPS && !hasProductMaterial(id, s),
     )
     .map(([id, q]) => ({
       id,
@@ -106,8 +115,73 @@ function defaultPowerRecipe(s = state) {
 function isPowerItem(id) {
   return id === "Workbench_Electricity" || !!I[id]?.powerSlot;
 }
+function materialId(id) {
+  return I[id]?.baseItem || (isPowerItem(id) ? "Workbench_Electricity" : id);
+}
+function ensureProductItem(id) {
+  if (Object.hasOwn(I, id)) return true;
+  const match = typeof id === "string" && id.match(/^(.+)__product_(\d+)$/);
+  if (
+    !match ||
+    !Object.hasOwn(I, match[1]) ||
+    I[match[1]].baseItem ||
+    Number(match[2]) > 10000
+  )
+    return false;
+  const base = match[1];
+  I[id] = {
+    ...I[base],
+    baseItem: base,
+    productSlot: true,
+    get name() {
+      return I[base].name;
+    },
+    set name(value) {},
+  };
+  return true;
+}
+function nextProductItem(base, s = state) {
+  base = materialId(base);
+  if (isPowerItem(base)) return nextPowerItem(s);
+  if (!s.products.some((p) => p.id === base)) return base;
+  for (let n = 1; n <= 10000; n++) {
+    const id = base + "__product_" + n;
+    if (!s.products.some((p) => p.id === id)) {
+      ensureProductItem(id);
+      return id;
+    }
+  }
+  return null;
+}
+function hasProductMaterial(id, s = state) {
+  return s.products.some((p) => materialId(p.id) === materialId(id));
+}
+function recipeSpecificTarget(id, s = state) {
+  return (
+    isPowerItem(id) ||
+    !!I[id]?.baseItem ||
+    s.products.some(
+      (p) => I[p.id]?.baseItem && materialId(p.id) === materialId(id),
+    )
+  );
+}
+function recipeTargetKey(id, s = state) {
+  return "source:" + recipeFor(id, s) + ":" + materialId(id);
+}
+function productTitle(id, s = state) {
+  const group = s.products.filter((p) => materialId(p.id) === materialId(id));
+  const number =
+    group.length > 1 ? " · #" + (group.findIndex((p) => p.id === id) + 1) : "";
+  return (
+    (I[id]?.name || id) +
+    number +
+    (recipeSpecificTarget(id, s)
+      ? " · " + (R[recipeFor(id, s)]?.name || "")
+      : "")
+  );
+}
 function recipeOptions(id) {
-  return OPTIONS[isPowerItem(id) ? "Workbench_Electricity" : id] || [];
+  return OPTIONS[materialId(id)] || [];
 }
 function nextPowerItem(s = state) {
   return [
@@ -118,7 +192,7 @@ function nextPowerItem(s = state) {
 function canonicalDemands(d) {
   const out = {};
   for (const [id, q] of Object.entries(d)) {
-    const material = isPowerItem(id) ? "Workbench_Electricity" : id;
+    const material = materialId(id);
     out[material] = (out[material] || 0) + q;
   }
   return out;
@@ -126,12 +200,17 @@ function canonicalDemands(d) {
 function recipeFor(id, s = state) {
   if (isPowerItem(id) && !Object.hasOwn(s.selected, id))
     return defaultPowerRecipe(s);
-  const chosen = Object.hasOwn(s.selected, id) ? s.selected[id] : DEFAULTS[id];
+  const base = materialId(id);
+  const chosen = Object.hasOwn(s.selected, id)
+    ? s.selected[id]
+    : I[id]?.baseItem
+      ? recipeFor(base, s)
+      : DEFAULTS[base];
   return chosen === "" &&
     !I[id]?.raw &&
     !s.supplies.some((x) => x.id === id) &&
     !s.nodes.some((n) => n.item === id)
-    ? DEFAULTS[id]
+    ? DEFAULTS[base]
     : chosen;
 }
 function restoreOrphanRecipes(s = state) {
@@ -259,19 +338,71 @@ function activeRecipes(s = state, required = []) {
     ...new Set(
       [
         ...ITEM_IDS.map((id) => (external.has(id) ? "" : recipeFor(id, s))),
+        ...s.products
+          .map((p) => recipeFor(p.id, s))
+          .filter(
+            (k) =>
+              R[k]?.kind === "machine" &&
+              (!R[k].generation || allowedGeneration.has(k)),
+          ),
         ...allowedGeneration,
+        // Fixed groups remain running processes even when another recipe is selected
+        // for the same output, or their output is also supplied externally.
+        ...Object.keys(s.machineGroupsEnabled ? s.machineGroups || {} : {}).filter(
+          k => s.machineGroups[k].groups.some(g => g.count > 0),
+        ),
       ].filter(
         (k) =>
           R[k]?.kind === "machine" &&
           (s.event || !R[k].event) &&
-          (!R[k].generation || allowedGeneration.has(k)),
+          (!R[k].generation || allowedGeneration.has(k) ||
+            (s.machineGroupsEnabled && s.machineGroups?.[k]?.groups.some(g => g.count > 0))),
       ),
     ),
-  ];
+  ].flatMap(key => groupedRecipes(key, s));
+}
+function recipeBase(key) { return R[key]?.groupParent || key; }
+function machineGroup(key, s = state) {
+  if (!s.machineGroupsEnabled) return null;
+  const r = R[key];
+  return r?.groupParent ? s.machineGroups?.[r.groupParent]?.groups.find(g => g.id === r.groupId) || null : null;
+}
+function normalizeMachineGroups(value) {
+  const out = {};
+  if (!value || typeof value !== 'object') return out;
+  for (const [key, profile] of Object.entries(value)) {
+    const r = R[key];
+    if (!r || r.kind !== 'machine' || r.groupParent || !Array.isArray(profile?.groups)) continue;
+    const slots = B[r.b]?.sloopSlots || 0, ids = new Set(), groups = [];
+    for (const [index, group] of profile.groups.slice(0, 100).entries()) {
+      let id = Number.isInteger(group.id) && group.id > 0 ? group.id : index + 1;
+      while (ids.has(id)) id++;
+      ids.add(id);
+      const count = Math.max(0, Math.min(1000000, Math.floor(Number(group.count) || 0)));
+      const clock = Math.max(1, Math.min(250, Number(group.clock) || 100));
+      const sloops = Math.max(0, Math.min(slots, Math.floor(Number(group.sloops) || 0)));
+      groups.push({ id, count, clock, sloops });
+    }
+    if (groups.length) out[key] = { mode: profile.mode === 'fixed' ? 'fixed' : 'capacity', groups };
+  }
+  return out;
+}
+function groupedRecipes(key, s = state) {
+  key = recipeBase(key);
+  if (!s.machineGroupsEnabled) return [key];
+  const profile = s.machineGroups?.[key];
+  if (!profile?.groups.length) return [key];
+  return profile.groups.filter(g => g.count > 0).map(group => {
+    const id = key + '__machineGroup_' + group.id;
+    if (!R[id]) R[id] = { ...R[key], groupParent: key, groupId: group.id,
+      get name() { return R[key].name + ' · ' + (document.documentElement.lang === 'en' ? 'Group ' : '组 ') + group.id; }, set name(value) {},
+      en: (R[key].en || R[key].name) + ' · Group ' + group.id };
+    return id;
+  });
 }
 function amplification(k, s = state) {
   const slots = B[R[k]?.b]?.sloopSlots || 0,
-    count = Math.max(0, Math.min(slots, Math.floor(amount(s.sloops?.[k]))));
+    count = Math.max(0, Math.min(slots, Math.floor(amount(machineGroup(k, s)?.sloops ?? s.sloops?.[k]))));
   return { slots, count, boost: slots ? 1 + count / slots : 1 };
 }
 function rates(k, s = state) {
@@ -302,10 +433,7 @@ function planSolve(
 ) {
   mode = mode || s.mode || "forward";
   const cap = mode === "constrained" ? s.inputConstraint : null;
-  if (
-    cap &&
-    (!I[cap.id]?.selectable || s.products.some((p) => p.id === cap.id))
-  )
+  if (cap && (!I[cap.id]?.selectable || hasProductMaterial(cap.id, s)))
     return { ok: false, constraintConflict: true };
   const waste = generatorWaste(s),
     pool = supplyPool(s),
@@ -321,17 +449,30 @@ function planSolve(
       variables: {},
     };
   const materialDemand = canonicalDemands(demand),
-    powerRequests = new Map();
+    sourceRequests = new Map();
   for (const [id, q] of Object.entries(demand))
-    if (isPowerItem(id)) {
-      const source = recipeFor(id, s);
-      powerRequests.set(source, (powerRequests.get(source) || 0) + q);
+    if (recipeSpecificTarget(id, s)) {
+      const key = recipeTargetKey(id, s);
+      const entry = sourceRequests.get(key) || {
+        recipe: recipeFor(id, s),
+        item: materialId(id),
+        q: 0,
+      };
+      entry.q += q;
+      sourceRequests.set(key, entry);
     }
   for (const id of [...(target ? [target] : []), ...Object.keys(flex || {})])
-    if (isPowerItem(id) && !powerRequests.has(recipeFor(id, s)))
-      powerRequests.set(recipeFor(id, s), 0);
-  for (const [source, q] of powerRequests)
-    model.constraints["power:" + source] = { min: q };
+    if (recipeSpecificTarget(id, s)) {
+      const key = recipeTargetKey(id, s);
+      if (!sourceRequests.has(key))
+        sourceRequests.set(key, {
+          recipe: recipeFor(id, s),
+          item: materialId(id),
+          q: 0,
+        });
+    }
+  for (const [key, entry] of sourceRequests)
+    model.constraints[key] = { min: entry.q };
   const involved = new Set([
     ...Object.keys(materialDemand),
     ...Object.keys(pool),
@@ -351,8 +492,16 @@ function planSolve(
       v = { objective: target || flex ? 0 : 0.00001 };
     for (const [id, q] of Object.entries(rr.outs)) v[id] = (v[id] || 0) + q;
     for (const [id, q] of Object.entries(rr.ins)) v[id] = (v[id] || 0) - q;
-    if (powerRequests.has(k))
-      v["power:" + k] = rr.outs.Workbench_Electricity || 0;
+    for (const [key, entry] of sourceRequests)
+      if (entry.recipe === recipeBase(k)) v[key] = rr.outs[entry.item] || 0;
+    const group = machineGroup(k, s);
+    if (group) {
+      const capacity = group.count * machineClock(k, s) / 100;
+      const key = 'machine-capacity:' + k;
+      model.constraints[key] = { max: capacity };
+      if (s.machineGroups[R[k].groupParent].mode === 'fixed') model.constraints[key].min = capacity;
+      v[key] = 1;
+    }
     model.variables[k] = v;
   }
   for (const [id, q] of Object.entries(waste))
@@ -367,20 +516,14 @@ function planSolve(
   if (mode !== "forward")
     for (const id of involved)
       if (
-        !s.products.some((p) => p.id === id) &&
+        !hasProductMaterial(id, s) &&
         (I[id]?.raw ||
           !recipeFor(id, s) ||
           s.supplies.some((x) => x.id === id && x.stop))
       )
         externals.add(id);
   for (const id of externals) {
-    if (
-      s.products.some(
-        (p) =>
-          p.id === id || (id === "Workbench_Electricity" && isPowerItem(p.id)),
-      )
-    )
-      continue;
+    if (hasProductMaterial(id, s) && !(I[id]?.raw && s.supplies.some(p => p.id === id))) continue;
     const v = { objective: target || flex ? 0 : 1, [id]: 1 };
     if (mode === "forward" || (cap && id === cap.id)) {
       model.constraints["s:" + id] = {
@@ -394,6 +537,7 @@ function planSolve(
     for (const id of externals) {
       model.constraints["use:" + id] = { max: pool[id] || 0 };
       const v = model.variables["ext:" + id];
+      if (!v) continue;
       v.objective = 0.000001;
       v["use:" + id] = 1;
       model.variables["short:" + id] = { objective: 1, [id]: 1 };
@@ -402,10 +546,10 @@ function planSolve(
   if (target || flex) {
     const v = { objective: 1 };
     for (const [id, q] of Object.entries(target ? { [target]: 1 } : flex)) {
-      const item = isPowerItem(id) ? "Workbench_Electricity" : id;
+      const item = materialId(id);
       v[item] = (v[item] || 0) - q;
-      if (isPowerItem(id)) {
-        const key = "power:" + recipeFor(id, s);
+      if (recipeSpecificTarget(id, s)) {
+        const key = recipeTargetKey(id, s);
         v[key] = (v[key] || 0) - q;
       }
     }
@@ -439,6 +583,8 @@ function allocationMax(id, s = state) {
   });
 }
 function machineClock(k, s = state) {
+  const group = machineGroup(k, s);
+  if (group) return Math.min(s.over ? 250 : 100, group.clock);
   const v = s.machineClocks?.[R[k]?.b];
   return Number.isFinite(v) && v >= 1
     ? Math.min(s.over ? 250 : 100, v)
@@ -456,14 +602,17 @@ function configure(k, eq, s = state) {
       full * Math.pow(cap, exponent) +
       (tail ? Math.pow(tail, exponent) * duty : 0);
   const amp = amplification(k, s);
+  const group = machineGroup(k, s);
   return {
     full,
     cap,
     tail,
     duty,
-    n,
+    n: group ? group.count : n,
+    activeN: n,
+    groupId: R[k].groupId || null,
     sloops: amp.count,
-    sloopTotal: n * amp.count,
+    sloopTotal: (group ? group.count : n) * amp.count,
     boost: amp.boost,
     power: R[k].p * factor * s.powerMult * amp.boost ** 2,
     peak: R[k].peak * factor * s.powerMult * amp.boost ** 2,
@@ -485,7 +634,7 @@ function summarize(solution, s = state) {
     shards = 0;
   for (const k of solution.rs) {
     const eq = solution.result[k] || 0;
-    if (eq < EPS) continue;
+    if (eq < EPS && !machineGroup(k, s)) continue;
     const rr = rates(k, s),
       config = configure(k, eq, s),
       ins = {},
@@ -541,7 +690,10 @@ function summarize(solution, s = state) {
     machines,
     shards,
     sloopTotal: rows.reduce((n, r) => n + (r.sloopTotal || 0), 0),
-    generation: output.Workbench_Electricity || 0,
+    generation:
+      (output.Workbench_Electricity || 0) + geothermalPower(s).average,
+    importedPower: supplyPool(s).Workbench_Electricity || 0,
+    geothermal: geothermalPower(s),
   };
 }
 function diagnose(id, q, s = state) {
@@ -649,6 +801,71 @@ function fitSupplies() {
       if (!p.lock) p.q = cleanComputedQuantity(p.q * ratio);
   }
 }
+function isRecycledOutput(recipe, item) {
+  const r = R[recipe];
+  return Object.keys(r.outs).indexOf(item) > 0 || Object.hasOwn(r.ins, item);
+}
+function reuseAndStartup(plan, s = state) {
+  const graph = flowGraph(plan, s),
+    recipeIds = new Set(plan.rows.map((row) => row.k));
+  const targets = canonicalDemands(demands(s)),
+    items = new Map();
+  for (const row of plan.rows)
+    for (const [id, q] of Object.entries(row.outs)) {
+      if (!isRecycledOutput(row.k, id) || q <= EPS || isPowerItem(id)) continue;
+      const entry = items.get(id) || {
+        id,
+        produced: 0,
+        reused: 0,
+        toTarget: 0,
+        surplus: 0,
+        sources: new Set(),
+      };
+      entry.produced += q;
+      entry.sources.add(row.k);
+      items.set(id, entry);
+    }
+  for (const e of graph.edges) {
+    const entry = items.get(e.item);
+    if (!entry || !entry.sources.has(e.from)) continue;
+    if (recipeIds.has(e.to)) entry.reused += e.q;
+    else if (e.to.startsWith("p:")) entry.toTarget += e.q;
+    else if (e.to.startsWith("w:")) entry.surplus += e.q;
+  }
+  return [...items.values()]
+    .map((entry) => {
+      const steady = plan.external[entry.id] || 0;
+      const primaryOutput = Math.max(
+        0,
+        (plan.output[entry.id] || 0) - entry.produced,
+      );
+      // Conservative rate while byproduct output has not reached consumers yet.
+      const startup = Math.max(
+        steady,
+        (plan.input[entry.id] || 0) + (targets[entry.id] || 0) - primaryOutput,
+      );
+      return {
+        ...entry,
+        steady,
+        startup,
+        additional: Math.max(0, startup - steady),
+      };
+    })
+    .sort(
+      (a, b) =>
+        Number(b.reused > EPS) - Number(a.reused > EPS) ||
+        b.additional - a.additional ||
+        a.id.localeCompare(b.id),
+    );
+}
+function renderReuseAndStartup(plan) {
+  const rows = reuseAndStartup(plan);
+  const table = rows.length
+    ? `<div class="tablewrap"><table><thead><tr><th>副产物</th><th>产生 / 分</th><th>内部回用 / 分</th><th>最终产物 / 分</th><th>待处理 / 分</th><th>启动供给能力 / 分</th><th>稳态外供 / 分</th><th>回用后可减少 / 分</th></tr></thead><tbody>${rows.map((r) => `<tr><td>${esc(I[r.id]?.name || r.id)}<small> ${unit(r.id)}</small>${r.steady < EPS && r.additional > EPS ? '<div class="badge">需预充或临时外供</div>' : ""}</td><td>${fmt(r.produced)}</td><td>${fmt(r.reused)}</td><td>${fmt(r.toTarget)}</td><td>${fmt(r.surplus)}</td><td><b>${fmt(r.startup)}</b></td><td>${fmt(r.steady)}</td><td>${fmt(r.additional)}</td></tr>`).join("")}</tbody></table></div>`
+    : '<p class="small">当前方案没有产生需要回用的副产物。</p>';
+  $("processBalance").innerHTML = table;
+}
+
 function flowGraph(plan, s = state) {
   const nodes = [],
     edges = [],
@@ -658,7 +875,7 @@ function flowGraph(plan, s = state) {
   for (const [id, q] of Object.entries(plan.external))
     if (q > 1e-6) {
       add("e:" + id, I[id].name, "external", { item: id, q });
-      (supply[id] ??= []).push({ node: "e:" + id, q });
+      (supply[id] ??= []).push({ node: "e:" + id, q, priority: 2 });
     }
   for (const row of plan.rows) {
     add(row.k, R[row.k].name, "recipe", {
@@ -666,14 +883,21 @@ function flowGraph(plan, s = state) {
       item: Object.keys(row.outs)[0],
     });
     for (const [id, q] of Object.entries(row.outs))
-      (supply[id] ??= []).push({ node: row.k, q });
+      (supply[id] ??= []).push({
+        node: row.k,
+        q,
+        priority: isRecycledOutput(row.k, id) ? 0 : 1,
+      });
   }
   const take = (item, q, to, preferred = null) => {
-    const list = preferred
-      ? [...(supply[item] || [])].sort(
-          (a, b) => Number(b.node === preferred) - Number(a.node === preferred),
-        )
-      : supply[item] || [];
+    // Allocate byproducts before primary production and external supply.
+    // Electricity targets still prefer their explicitly selected generator.
+    const list = [...(supply[item] || [])].sort(
+      (a, b) =>
+        (preferred
+          ? Number(recipeBase(b.node) === preferred) - Number(recipeBase(a.node) === preferred)
+          : 0) || a.priority - b.priority,
+    );
     for (const src of list) {
       if (q < 1e-6) break;
       const n = Math.min(q, src.q);
@@ -684,26 +908,21 @@ function flowGraph(plan, s = state) {
       }
     }
   };
-  for (const row of plan.rows)
-    for (const [id, q] of Object.entries(row.ins)) take(id, q, row.k);
   for (const p of s.products)
     if (p.q > 1e-6) {
-      add(
-        "p:" + p.id,
-        I[p.id].name +
-          (isPowerItem(p.id)
-            ? " · " + (R[recipeFor(p.id, s)]?.name || "")
-            : ""),
-        "product",
-        { item: p.id, q: p.q },
-      );
+      add("p:" + p.id, productTitle(p.id, s), "product", {
+        item: p.id,
+        q: p.q,
+      });
       take(
-        isPowerItem(p.id) ? "Workbench_Electricity" : p.id,
+        materialId(p.id),
         p.q,
         "p:" + p.id,
-        isPowerItem(p.id) ? recipeFor(p.id, s) : null,
+        recipeSpecificTarget(p.id, s) ? recipeFor(p.id, s) : null,
       );
     }
+  for (const row of plan.rows)
+    for (const [id, q] of Object.entries(row.ins)) take(id, q, row.k);
   for (const [id, list] of Object.entries(supply)) {
     const q = list.reduce((a, x) => a + x.q, 0);
     if (q > 1e-5) {
@@ -762,7 +981,7 @@ function machineDisplayOrder(rows, s = state, plan = null) {
 }
 function buildProgress(key, n) {
   const done = builtCount(key, n);
-  return `<label class="buildcheck"><input type="checkbox" data-built-all="${esc(key)}" data-total="${n}" ${done === n ? "checked" : ""}> 已建成</label><label class="small">已建 <input class="built-number" type="number" min="0" max="${n}" step="1" data-built-count="${esc(key)}" data-total="${n}" value="${done}"> / ${fmt(n)} 台</label>`;
+  return `<label class="buildcheck"><input type="checkbox" data-built-all="${esc(key)}" data-total="${n}" ${done === n ? "checked" : ""}> 已建成</label><label class="small">已建 <input class="built-number" type="number" min="0" max="${n}" step="1" data-built-count="${esc(key)}" data-total="${n}" value="${displayNumber(done)}"> / ${fmt(n)} 台</label>`;
 }
 function costText(id, n) {
   if (n <= 0) return "—";
@@ -861,6 +1080,17 @@ function constructionPlan(plan = current, s = state) {
         (n.pressurizers - builtCount(press, n.pressurizers, s)) * shard,
       );
     }
+  }
+  for (const purity of ["impure", "normal", "pure"]) {
+    const n = normalizeGeothermal(s.geothermal)[purity];
+    add(
+      "geo:" + purity,
+      "Desc_GeneratorGeoThermal_C",
+      n,
+      0,
+      0,
+      "地热发电 · " + purity,
+    );
   }
   for (const g of s.generators) {
     const key = "gen:" + g.id + ":" + g.fuel,
@@ -972,6 +1202,22 @@ function openComparison(id, candidate) {
   renderComparison();
   $("compareDialog").showModal();
 }
+function comparisonRecipeDetails(key, s, title) {
+  const r = R[key];
+  if (!r || r.kind !== "machine")
+    return `<section class="compare-recipe"><h3>${title}</h3><p>外供 / 不自动生产</p><p class="small">该物料从外部供给取得，不配置生产机器。</p></section>`;
+  const rr = rates(key, s);
+  const lines = (values) =>
+    Object.entries(values)
+      .map(
+        ([id, q]) =>
+          `<div class="compare-material">${icon(id)}<span>${esc(I[id]?.name || id)}</span><strong>${fmt(q)}</strong><small>${unit(id)}</small></div>`,
+      )
+      .join("") || '<p class="small">无</p>';
+  const amp = amplification(key, s);
+  return `<section class="compare-recipe"><div class="compare-recipe-title"><small>${title}</small><h3>${esc(r.name)}</h3></div><div class="itemhead">${icon(r.b)}<div><b>${esc(B[r.b]?.name || r.b)}</b><span class="compare-recipe-basis">单台机器 · 100% 频率</span></div></div><div class="compare-material-block"><h4>输入材料</h4>${lines(rr.ins)}</div><div class="compare-material-block"><h4>输出产物</h4>${lines(rr.outs)}</div>${amp.count ? `<p class="small">索莫晶体 / 台：${amp.count} · 产出 ×${fmt(amp.boost)}</p>` : ""}</section>`;
+}
+
 function renderComparison() {
   if (!comparison) return;
   const { id } = comparison,
@@ -982,11 +1228,11 @@ function renderComparison() {
     const n = y - x;
     return (n > EPS ? "+" : "") + fmt(n);
   };
-  let html = `<p>固定最终产量：${Object.entries(d)
+  let html = `<div class="compare-recipes">${comparisonRecipeDetails(recipeFor(id, comparison.a), comparison.a, "当前配方详情")}${comparisonRecipeDetails(candidate, comparison.b, "候选配方详情")}</div><p>固定最终产量：${Object.entries(
+    d,
+  )
     .map(([i, q]) => esc(I[i].name) + " " + fmt(q) + " " + unit(i))
-    .join(
-      "；",
-    )}</p><p>当前配方：${esc(R[recipeFor(id)]?.name || "外供 / 不自动生产")}</p>`;
+    .join("；")}</p>`;
   if (!a || !b)
     html +=
       '<p class="over">' +
@@ -1037,7 +1283,7 @@ function openMissing(id) {
   $("missingMessage").textContent = "";
   const pool = supplyPool();
   $("missingBody").innerHTML =
-    `<p>${esc(diagnostic.reason)}</p><div class="tablewrap"><table><thead><tr><th>添加</th><th>物料</th><th>现有供给</th><th>缺口 / 分</th><th>本次添加 / 分</th></tr></thead><tbody>${diagnostic.missing.map((x) => `<tr><td><input type="checkbox" data-missing-check="${x.id}" ${x.id === id ? "checked" : ""}></td><td>${esc(I[x.id].name)} <small>${unit(x.id)}</small></td><td>${fmt(pool[x.id])}</td><td>${fmt(x.q)}</td><td><input type="number" min="0" step="any" data-missing-amount="${x.id}" value="${+x.q.toFixed(8)}"></td></tr>`).join("")}</tbody></table></div>`;
+    `<p>${esc(diagnostic.reason)}</p><div class="tablewrap"><table><thead><tr><th>添加</th><th>物料</th><th>现有供给</th><th>缺口 / 分</th><th>本次添加 / 分</th></tr></thead><tbody>${diagnostic.missing.map((x) => `<tr><td><input type="checkbox" data-missing-check="${x.id}" ${x.id === id ? "checked" : ""}></td><td>${esc(I[x.id].name)} <small>${unit(x.id)}</small></td><td>${fmt(pool[x.id])}</td><td>${fmt(x.q)}</td><td><input type="number" min="0" step="any" data-missing-amount="${x.id}" value="${displayNumber(+x.q.toFixed(3))}"></td></tr>`).join("")}</tbody></table></div>`;
   const preview = missingPlan();
   if (preview) {
     const affected = preview.plan.rows.filter((r) => r.ins[id] > EPS);
@@ -1140,12 +1386,7 @@ function initEnhancements() {
       const q = amount(
         document.querySelector(`[data-missing-amount="${x.id}"]`)?.value,
       );
-      if (
-        q <= EPS ||
-        state.products.some((p) => p.id === x.id) ||
-        I[x.id].handOnly
-      )
-        continue;
+      if (q <= EPS || hasProductMaterial(x.id) || I[x.id].handOnly) continue;
       let sup = state.supplies.find((s) => s.id === x.id);
       if (!sup) {
         sup = { id: x.id, q: 0, stop: true };
@@ -1267,6 +1508,7 @@ function workspacePayload() {
 }
 function persistWorkspace() {
   if (!workspaceReady) return;
+  recordUndoHistory();
   try {
     localStorage.setItem(WORKSPACE_KEY, JSON.stringify(workspacePayload()));
     saveProblem = false;
@@ -1303,42 +1545,29 @@ function loadWorkspace() {
     );
   }
 }
-function exportWorkspace() {
-  download(
-    "satisfactory-factory-config.json",
-    JSON.stringify(workspacePayload(), null, 2),
-  );
+function exportSinglePlan(plan = null) {
+  const source = plan || { ...workshop.active, state };
+  const payload = PlanFiles.payload(source, DATA.version);
+  download(PlanFiles.filename(payload.name), JSON.stringify(payload, null, 2));
 }
 async function importWorkspaceFile(e) {
-  const f = e.target.files[0];
-  if (!f) return;
+  const files = Array.from(e.target.files || []);
+  if (!files.length) return;
   try {
-    const x = JSON.parse(await f.text());
-    if (x.format === "satisfactory-workspace") {
-      const { w, s } = normalizeWorkspace(x);
-      workshop = w;
-      state = s;
-    } else {
-      const s = safeState(x);
-      workshop.previous = { active: copy(workshop.active), state: copy(state) };
-      workshop.active = {
-        name: f.name.replace(/\.json$/i, ""),
-        kind: "new",
-        id: null,
-      };
-      state = s;
-    }
+    const batches = await Promise.all(files.map(async file => PlanFiles.read(
+      JSON.parse(await file.text()), file.name.replace(/\.json$/i, ''), validSnapshot,
+    )));
+    const incoming = batches.flat();
+    workshop = PlanFiles.merge(workshop, incoming);
     workspaceReady = true;
-    renderAll();
-    setStatus(
-      x.format === "satisfactory-workspace"
-        ? "完整配置已导入，已有产线、方案和建设进度已恢复。"
-        : "旧版单方案已导入；已有基准和其他方案保留。",
-    );
+    save();
+    renderWorkspace();
+    setStatus('已合并 ' + incoming.length + ' 个方案，可在方案列表中载入。');
   } catch (err) {
-    setStatus("导入失败：" + err.message, true);
+    setStatus('导入失败：' + err.message, true);
+  } finally {
+    e.target.value = '';
   }
-  e.target.value = "";
 }
 function evaluatePlan(s) {
   const p = summarize(planSolve(demands(s), s, { mode: s.mode }), s);
@@ -1584,7 +1813,7 @@ function renderWorkspace() {
         )}</tbody></table></div></details><div class="buttons"><button id="loadExisting">载入已有产线设计</button><button id="reuseExisting">按已有机器设置已建数量</button></div>`
     : "<p>尚未记录已有产线。</p>";
   $("plansList").innerHTML = workshop.plans.length
-    ? `<div class="tablewrap"><table><thead><tr><th>名称</th><th>类型</th><th>保存时间</th><th>操作</th></tr></thead><tbody>${workshop.plans.map((p) => `<tr><td>${esc(p.name)}</td><td>${p.kind === "retrofit" ? "改装" : "新建"}</td><td>${esc(p.savedAt.replace("T", " ").slice(0, 19))} UTC</td><td><div class="buttons"><button data-load-plan="${p.id}">载入</button><button data-compare-plan="${p.id}">对比</button><button data-delete-plan="${p.id}">删除</button></div></td></tr>`).join("")}</tbody></table></div>`
+    ? `<div class="tablewrap"><table><thead><tr><th>名称</th><th>类型</th><th>保存时间</th><th>操作</th></tr></thead><tbody>${workshop.plans.map((p) => `<tr><td>${esc(p.name)}</td><td>${p.kind === "retrofit" ? "改装" : "新建"}</td><td>${esc(p.savedAt.replace("T", " ").slice(0, 19))} UTC</td><td><div class="buttons"><button data-load-plan="${p.id}">载入</button><button data-export-plan="${p.id}">导出方案</button><button data-export-supply="${p.id}" ${p.id === workshop.active.id ? "disabled" : ""}>产物 → 当前供给</button><button data-compare-plan="${p.id}">对比</button><button data-delete-plan="${p.id}">删除</button></div></td></tr>`).join("")}</tbody></table></div>`
     : "<p>尚未保存命名方案。</p>";
   $("planCompareChoice").innerHTML =
     '<option value="existing">已有产线基准</option>' +
@@ -1814,11 +2043,15 @@ function initProjects() {
     renderPlanComparison();
     save();
   };
-  $("exportConfig").onclick = exportWorkspace;
+  $("exportConfig").onclick = () => exportSinglePlan();
   document.addEventListener("click", (e) => {
     const button = e.target.closest("button");
     if (!button) return;
     const d = button.dataset;
+    if (d.exportPlan) {
+      const plan = workshop.plans.find(p => p.id === +d.exportPlan);
+      if (plan) exportSinglePlan(plan);
+    }
     if (d.loadPlan) {
       const p = workshop.plans.find((p) => p.id === +d.loadPlan);
       if (p) loadNamedPlan(p);
@@ -2380,11 +2613,11 @@ function renderMapDetail() {
     return;
   }
   const existing = state.nodes.find((x) => x.mapId === n.id),
-    conflict = state.products.some((p) => p.id === n.item),
+    conflict = hasProductMaterial(n.item),
     collectible = !["node", "well", "geyser"].includes(n.kind),
     core = n.core && MAP_DATA.cores[n.core];
   $("mapDetail").innerHTML =
-    `<div class="itemhead">${ICONS[n.item] ? icon(n.item) : ""}<div><h3>${esc(mapLabel(n))}</h3><small>${MAP_TYPES[n.kind]} ${MAP_PURITY[n.purity] || ""}</small></div></div><p>X ${fmt(n.x)} m<br>Y ${fmt(n.y)} m<br>高度 ${fmt(n.z)} m</p>${
+    `<div class="itemhead">${ICONS[materialId(n.item)] ? icon(n.item) : ""}<div><h3>${esc(mapLabel(n))}</h3><small>${MAP_TYPES[n.kind]} ${MAP_PURITY[n.purity] || ""}</small></div></div><p>X ${fmt(n.x)} m<br>Y ${fmt(n.y)} m<br>高度 ${fmt(n.z)} m</p>${
       ["node", "well"].includes(n.kind)
         ? `<label>采集设备<select id="mapMiner">${mapNodeOptions(n)
             .map(
@@ -2393,7 +2626,7 @@ function renderMapDetail() {
             )
             .join(
               "",
-            )}</select></label><label>频率 %<input id="mapClock" type="number" min="1" max="250" step="any" value="${existing?.clock || 100}"></label><label>出口上限<select id="mapOutlet">${(I[n.item]?.fluid ? [300, 600] : BELTS).map((q) => `<option value="${q}" ${q === (existing ? (I[n.item].fluid ? existing.pipe : existing.belt) : I[n.item].fluid ? 600 : 1200) ? "selected" : ""}>${q} ${unit(n.item)}</option>`).join("")}</select></label><p id="mapNodeRate"></p>${core ? `<p class="small">同井 ${core.nodes.length} 个卫星点，共用一座增压站和同一频率。</p>` : ""}<button class="primary" id="mapAddSupply" ${conflict ? "disabled" : ""}>${existing ? "更新此点供给" : "加入当前供给"}</button>${core ? `<button id="mapAddWell" ${conflict ? "disabled" : ""}>加入整组资源井</button>` : ""}${conflict ? '<p class="over">该资源已选作最终产物，请先移除该最终产物。</p>' : ""}`
+            )}</select></label><label>频率 %<input id="mapClock" type="number" min="1" max="250" step="any" value="${displayNumber(existing?.clock || 100)}"></label><label>出口上限<select id="mapOutlet">${(I[n.item]?.fluid ? [300, 600] : BELTS).map((q) => `<option value="${q}" ${q === (existing ? (I[n.item].fluid ? existing.pipe : existing.belt) : I[n.item].fluid ? 600 : 1200) ? "selected" : ""}>${q} ${unit(n.item)}</option>`).join("")}</select></label><p id="mapNodeRate"></p>${core ? `<p class="small">同井 ${core.nodes.length} 个卫星点，共用一座增压站和同一频率。</p>` : ""}<button class="primary" id="mapAddSupply" ${conflict ? "disabled" : ""}>${existing ? "更新此点供给" : "加入当前供给"}</button>${core ? `<button id="mapAddWell" ${conflict ? "disabled" : ""}>加入整组资源井</button>` : ""}${conflict ? '<p class="over">该资源已选作最终产物，请先移除该最终产物。</p>' : ""}`
         : ""
     }${n.kind === "geyser" ? "<p>地热位置参考点。</p>" : ""}${collectible ? `<label><input type="checkbox" id="mapCollected" ${state.map.collected.includes(n.id) ? "checked" : ""}> 已收集</label>` : ""}${n.requirement ? `<p>硬盘解锁：${[n.requirement.itemQuantity ? esc(I[n.requirement.itemId]?.name || n.requirement.itemId) + " × " + fmt(n.requirement.itemQuantity) : "", n.requirement.powerNeeded ? fmt(n.requirement.powerNeeded) + " MW" : ""].filter(Boolean).join(" ＋ ") || "无物料或功率要求"}</p>` : ""}<button id="mapPinAtNode">在此标记工厂</button><details><summary class="small">点位编号</summary><small class="map-id">${esc(n.id)}</small></details>`;
   for (const id of ["mapMiner", "mapClock", "mapOutlet"])
@@ -2442,7 +2675,7 @@ function addMapSupply(whole) {
     whole && selected.core
       ? MAP_DATA.cores[selected.core].nodes
       : [selected.id];
-  if (state.products.some((p) => p.id === selected.item)) {
+  if (hasProductMaterial(selected.item)) {
     setStatus("该资源与最终产物冲突。", true);
     return;
   }
@@ -2488,8 +2721,8 @@ function openMapPin(x, y, pin = null) {
   $("mapPinName").value =
     pin?.name || workshop.active.name.replace("未命名方案", "工厂");
   $("mapPinKind").value = pin?.kind || "planned";
-  $("mapPinX").value = +x.toFixed(4);
-  $("mapPinY").value = +y.toFixed(4);
+  $("mapPinX").value = +x.toFixed(3);
+  $("mapPinY").value = +y.toFixed(3);
   $("mapPinNote").value = pin?.note || "";
   $("mapDeletePin").hidden = !pin;
   $("mapPinDialog").showModal();
@@ -3534,7 +3767,9 @@ function progressRows(task = progressTask()) {
       delivered = Math.min(need, Math.floor(amount(rec.delivered))),
       stock = Math.floor(amount(rec.stock)),
       left = Math.max(0, need - delivered - stock),
-      q = state.products.find((x) => x.id === id)?.q || 0;
+      q = state.products
+        .filter((x) => materialId(x.id) === id)
+        .reduce((sum, x) => sum + x.q, 0);
     return {
       id,
       need,
@@ -3597,7 +3832,7 @@ function renderProgress() {
         ? "物资已备齐，请在游戏中提交；太空电梯仍需手动确认发射。"
         : "剩余数量已扣除已提交量和未提交库存。");
   $("progressTable").innerHTML =
-    `<table><thead><tr><th>物品</th><th>总需求</th><th>已提交</th><th>未提交库存</th><th>还需生产</th><th>规划产量 / 分</th><th>预计备齐</th><th>操作</th></tr></thead><tbody>${rows.map((r) => `<tr><td>${icon(r.id)} ${esc(I[r.id].name)}</td><td>${fmt(r.need)}</td><td><input style="width:100px" aria-label="${esc(I[r.id].name)}已提交" data-progress-item="${r.id}" data-progress-field="delivered" type="number" min="0" max="${r.need}" step="1" value="${r.delivered}"></td><td><input style="width:100px" aria-label="${esc(I[r.id].name)}库存" data-progress-item="${r.id}" data-progress-field="stock" type="number" min="0" step="1" value="${r.stock}"></td><td>${fmt(r.left)}</td><td>${fmt(r.q)}</td><td>${progressETA(r.eta)}</td><td><button data-progress-add="${r.id}" ${!r.left ? "disabled" : ""}>规划 ${fmt(r.rate)}/分</button></td></tr>`).join("")}</tbody></table>`;
+    `<table><thead><tr><th>物品</th><th>总需求</th><th>已提交</th><th>未提交库存</th><th>还需生产</th><th>规划产量 / 分</th><th>预计备齐</th><th>操作</th></tr></thead><tbody>${rows.map((r) => `<tr><td>${icon(r.id)} ${esc(I[r.id].name)}</td><td>${fmt(r.need)}</td><td><input style="width:100px" aria-label="${esc(I[r.id].name)}已提交" data-progress-item="${r.id}" data-progress-field="delivered" type="number" min="0" max="${r.need}" step="1" value="${displayNumber(r.delivered)}"></td><td><input style="width:100px" aria-label="${esc(I[r.id].name)}库存" data-progress-item="${r.id}" data-progress-field="stock" type="number" min="0" step="1" value="${displayNumber(r.stock)}"></td><td>${fmt(r.left)}</td><td>${fmt(r.q)}</td><td>${progressETA(r.eta)}</td><td><button data-progress-add="${r.id}" ${!r.left ? "disabled" : ""}>规划 ${fmt(r.rate)}/分</button></td></tr>`).join("")}</tbody></table>`;
   drawProgressMap();
 }
 function addProgressTargets(entries) {
@@ -3617,12 +3852,15 @@ function addProgressTargets(entries) {
       notices.push(item.name + "已在供给中，请先调整供给");
       continue;
     }
-    const old = state.products.find((x) => x.id === id);
-    if (old?.lock && old.q + EPS < rate) {
+    const related = state.products.filter((x) => materialId(x.id) === id);
+    const total = related.reduce((sum, x) => sum + x.q, 0);
+    if (total + EPS >= rate) continue;
+    const old = related.find((x) => !x.lock);
+    if (related.length && !old) {
       notices.push(item.name + "已锁定，未修改");
       continue;
     }
-    if (old) old.q = Math.max(old.q, rate);
+    if (old) old.q = cleanComputedQuantity(old.q + rate - total);
     else state.products.push({ id, q: rate, lock: false, pin: false });
     added++;
   }
@@ -4128,7 +4366,7 @@ function initInterface() {
       "工作台",
       [navButton("settings"), navButton("home"), navButton("journal")].join(""),
     ) +
-    '<div class="sidebar-foot">离线产线工作台<br>配置保存在当前浏览器<br>可导出 JSON 备份与迁移</div>';
+    '<div class="sidebar-foot">离线产线工作台<br>配置保存在当前浏览器<br>每个方案单独导出 JSON</div>';
   for (const el of document.querySelectorAll("main > .source, main > footer"))
     document.querySelector("main").append(el);
   const planner = $("plannerTab"),
@@ -4141,7 +4379,7 @@ function initInterface() {
   const heading = document.createElement("div");
   heading.className = "planner-heading";
   heading.innerHTML =
-    '<div><span class="planner-kicker">PRODUCTION WORKBENCH</span><h1>产线规划</h1><p>供给 → 产物 → 机器与建设 · 核燃料、发电与废料统一配平</p></div><div class="buttons"><button data-open="supply">＋ 添加供给</button><button class="primary" data-open="product">＋ 添加产物</button><button data-planner-mind>思维导图 ↗</button></div>';
+    '<div><h1>产线规划</h1><p>供给 → 产物 → 机器与建设 · 核燃料、发电与废料统一配平</p></div><div class="buttons"><button data-open="supply">＋ 添加供给</button><button class="primary" data-open="product">＋ 添加产物</button><button data-planner-mind>思维导图 ↗</button></div>';
   planner.prepend(heading);
   const settings = document.createElement("details");
   settings.className = "panel planner-settings-fold";
@@ -4511,12 +4749,12 @@ function boardPorts(n) {
     ins: n.row
       ? Object.entries(n.row.ins)
       : n.type === "product" || n.type === "surplus"
-        ? [[n.item, n.q]]
+        ? [[materialId(n.item), n.q]]
         : [],
     outs: n.row
       ? Object.entries(n.row.outs)
       : n.type === "external"
-        ? [[n.item, n.q]]
+        ? [[materialId(n.item), n.q]]
         : [],
   };
 }
@@ -4537,8 +4775,7 @@ function renderProductionMind() {
     s.products
       .filter((p) => p.q > EPS)
       .map(
-        (p) =>
-          `<option value="${p.id}">${esc(I[p.id].name + (isPowerItem(p.id) ? " · " + (R[recipeFor(p.id, s)]?.name || "") : ""))}</option>`,
+        (p) => `<option value="${p.id}">${esc(productTitle(p.id, s))}</option>`,
       )
       .join("");
   if (s.products.some((p) => p.id === chosen && p.q > EPS))
@@ -4645,12 +4882,12 @@ function paintBoard() {
             surplus: "副产物 / 待处理",
           }[n.type],
       isBuilt = row && machineIsBuilt(row, graphPreview?.s || state);
-    svg += `<g data-board-node="${esc(n.id)}" transform="translate(${n.x},${n.y})" opacity="${boardSelected && !highlight.has(n.id) ? 0.55 : 1}" role="button" tabindex="0" aria-label="${esc(n.label)}：查看产线明细" style="cursor:grab"><title>${esc(n.label)}</title><rect width="380" height="${n.h}" rx="12" fill="white" stroke="${boardSelected === n.id ? "#e5a23f" : color}" stroke-width="${boardSelected === n.id ? 3 : 1.4}"/><path d="M12 1H368" stroke="${color}" stroke-width="4"/>${ICONS[n.item] ? `<image href="${ICONS[n.item]}" x="14" y="16" width="32" height="32"/>` : ""}${boardText(n.label, 54, 31, 14, "#172534", 21)}${boardText(sub + (n.cycle ? " · 循环工序" : "") + (isBuilt ? " · ✓已建" : ""), 54, 50, 11, color, 31)}${boardText(row ? machineLabel(row) : fmt(n.q) + " " + unit(n.item), 14, 77, 12, "#334155", 43)}<g data-board-fold="${esc(n.id)}" role="button" tabindex="0" aria-label="${n.fold ? "展开" : "收起"}卡片" style="cursor:pointer"><rect x="344" y="12" width="24" height="24" rx="5" fill="#edf2f7"/>${boardText(n.fold ? "+" : "−", 351, 29, 16)}</g>`;
+    svg += `<g data-board-node="${esc(n.id)}" transform="translate(${n.x},${n.y})" opacity="${boardSelected && !highlight.has(n.id) ? 0.55 : 1}" role="button" tabindex="0" aria-label="${esc(n.label)}：查看产线明细" style="cursor:grab"><title>${esc(n.label)}</title><rect width="380" height="${n.h}" rx="12" fill="white" stroke="${boardSelected === n.id ? "#e5a23f" : color}" stroke-width="${boardSelected === n.id ? 3 : 1.4}"/><path d="M12 1H368" stroke="${color}" stroke-width="4"/>${ICONS[materialId(n.item)] ? `<image href="${ICONS[materialId(n.item)]}" x="14" y="16" width="32" height="32"/>` : ""}${boardText(n.label, 54, 31, 14, "#172534", 21)}${boardText(sub + (n.cycle ? " · 循环工序" : "") + (isBuilt ? " · ✓已建" : ""), 54, 50, 11, color, 31)}${boardText(row ? machineLabel(row) : fmt(n.q) + " " + unit(n.item), 14, 77, 12, "#334155", 43)}<g data-board-fold="${esc(n.id)}" role="button" tabindex="0" aria-label="${n.fold ? "展开" : "收起"}卡片" style="cursor:pointer"><rect x="344" y="12" width="24" height="24" rx="5" fill="#edf2f7"/>${boardText(n.fold ? "+" : "−", 351, 29, 16)}</g>`;
     if (!n.fold) {
       svg += boardText(
         row
           ? R[n.id].generation
-            ? "发电 " + fmt(row.eq * R[n.id].generation) + " MW"
+            ? "发电 " + fmt(row.outs.Workbench_Electricity || 0) + " MW"
             : "耗电 " + fmt(row.power) + " MW · 峰值 " + fmt(row.peak) + " MW"
           : "物料流量 · 每分钟",
         14,
@@ -4682,7 +4919,7 @@ function renderBoardDetail() {
     el = $("boardDetail");
   if (!n) {
     el.innerHTML =
-      '<span class="eyebrow">INSPECTOR / 节点明细</span><h3>选择一张卡片</h3><p>左侧输入，右侧输出。点击卡片高亮直接连接，拖动卡片调整布局。</p><p class="small">连线由主产线配平自动生成。选择“只看上游／下游”可追踪整条支路。</p>';
+      '<h3>选择一张卡片</h3><p>左侧输入，右侧输出。点击卡片高亮直接连接，拖动卡片调整布局。</p>';
     return;
   }
   const row = n.row,
@@ -4692,15 +4929,15 @@ function renderBoardDetail() {
       ? `<p><b>${esc(B[R[n.id].b]?.name)}</b></p><p>${esc(machineLabel(row))}</p><p>末台${row.duty < 0.999999 ? "平均" : ""}产出：${esc(lastMachineOutputText(row))}</p>${preview ? "" : machineClockControl(row) + sloopControl(row)}${
           !preview
             ? `<label>切换配方<select id="boardRecipe">${recipeOptions(
-                R[n.id].generation
-                  ? state.products.find(
-                      (p) => isPowerItem(p.id) && recipeFor(p.id) === n.id,
-                    )?.id || "Workbench_Electricity"
-                  : Object.keys(row.outs)[0],
+                state.products.find(
+                  (p) =>
+                    recipeFor(p.id) === recipeBase(n.id) &&
+                    R[n.id].outs[materialId(p.id)] > 0,
+                )?.id || Object.keys(row.outs)[0],
               )
                 .map(
                   (k) =>
-                    `<option value="${k}"${k === n.id ? " selected" : ""}>${esc(R[k].name)}</option>`,
+                    `<option value="${k}"${k === recipeBase(n.id) ? " selected" : ""}>${esc(R[k].name)}</option>`,
                 )
                 .join(
                   "",
@@ -4708,7 +4945,7 @@ function renderBoardDetail() {
             : ""
         }`
       : ""
-  }${["ins", "outs"].map((side) => `<h4>${side === "ins" ? "输入" : "输出"}</h4>${n.ports[side].map(([id, q]) => `<div class="board-material">${icon(id)}<span>${esc(I[id].name)}</span><b>${fmt(q)} ${unit(id)}</b>${side === "outs" && row && !preview ? machineSupplyButton(id, n.id) : ""}</div>`).join("") || '<p class="small">无</p>'}`).join("")}${!preview && n.type === "product" ? `<label>目标 / ${unit(n.item)}<input id="boardTarget" type="number" min="0" step="any" value="${cleanComputedQuantity(n.q)}" ${state.products.find((p) => p.id === n.item)?.lock ? "disabled" : ""}></label><button id="boardApplyTarget" ${state.products.find((p) => p.id === n.item)?.lock ? "disabled" : ""}>更新产线</button>` : ""}<label style="display:block;margin-top:18px">节点备注<textarea id="boardNote" rows="3" maxlength="500" ${preview ? "disabled" : ""}>${esc(boardState().notes[n.id] || "")}</textarea></label>${preview ? '<p class="small">当前为缺料预览，编辑请返回主产线。</p>' : ""}`;
+  }${["ins", "outs"].map((side) => `<h4>${side === "ins" ? "输入" : "输出"}</h4>${n.ports[side].map(([id, q]) => `<div class="board-material">${icon(id)}<span>${esc(I[id].name)}</span><b>${fmt(q)} ${unit(id)}</b>${side === "outs" && row && !preview ? machineSupplyButton(id, n.id) : ""}</div>`).join("") || '<p class="small">无</p>'}`).join("")}${!preview && n.type === "product" ? `<label>目标 / ${unit(n.item)}<input id="boardTarget" type="number" min="0" step="any" value="${displayNumber(cleanComputedQuantity(n.q))}" ${state.products.find((p) => p.id === n.item)?.lock ? "disabled" : ""}></label><button id="boardApplyTarget" ${state.products.find((p) => p.id === n.item)?.lock ? "disabled" : ""}>更新产线</button>` : ""}<label style="display:block;margin-top:18px">节点备注<textarea id="boardNote" rows="3" maxlength="500" ${preview ? "disabled" : ""}>${esc(boardState().notes[n.id] || "")}</textarea></label>${preview ? '<p class="small">当前为缺料预览，编辑请返回主产线。</p>' : ""}`;
 }
 function zoomProductionMind() {
   const svg = $("productionMind").querySelector("svg");
@@ -4967,11 +5204,9 @@ function initProductionMind() {
     if (!n || graphPreview) return;
     if (e.target.id === "boardRecipe")
       applyRecipe(
-        R[n.id].generation
-          ? state.products.find(
-              (p) => isPowerItem(p.id) && recipeFor(p.id) === n.id,
-            )?.id || "Workbench_Electricity"
-          : Object.keys(n.row.outs)[0],
+        state.products.find(
+          (p) => recipeFor(p.id) === recipeBase(n.id) && R[n.id].outs[materialId(p.id)] > 0,
+        )?.id || Object.keys(n.row.outs)[0],
         e.target.value,
       );
     if (e.target.id === "boardNote") {
@@ -5111,7 +5346,7 @@ function railMath(r, fluid = false) {
   };
 }
 function railNumber(key, label, min = 0, step = "any") {
-  return `<label>${label}<input data-rail="${key}" type="number" min="${min}" step="${step}" value="${state.rail[key]}"></label>`;
+  return `<label>${label}<input data-rail="${key}" type="number" min="${min}" step="${step}" value="${displayNumber(state.rail[key])}"></label>`;
 }
 function railItemOptions(query = "") {
   const ids = ITEM_IDS.filter(
@@ -5131,8 +5366,8 @@ function renderRail() {
     fluid = I[r.item].fluid;
   $("railTab").innerHTML =
     `<div class="panel rail-heading"><div class="eyebrow">RAIL LOGISTICS / 铁路物流</div><h2>火车运力计算</h2><p>从产线需求出发，检查车厢、班次和站台是否够用。</p><div class="rail-route"><span>装货站</span><span>→ 满载运输 →</span><span>卸货站</span><span>→ 返回装货站</span></div></div>
- <div class="panel"><h3>01 / 运输物资</h3><div class="formgrid"><label>搜索物品<input id="railSearch" type="search" placeholder="中文 / 英文 / 拼音"></label><label>货物<select id="railItem"></select></label>${railNumber("demand", "需求 / " + unit(r.item))}${railNumber("margin", "预留运力 / %")}</div><div class="buttons" style="margin-top:14px"><button id="railImportSupply">带入当前物品的主产线外供需求</button><button id="railImportProduct">带入当前物品的目标产量</button><span id="railImportMessage" role="status"></span></div><p class="small">每次计算一种货物；车厢专用且均匀分货。打包流体请选择对应的包装物品。</p></div>
- <div class="panel"><h3>02 / 列车与站台</h3><div class="formgrid">${railNumber("minutes", "实测完整往返 / 分钟", 0.01)}${railNumber("wagons", "每列货运车厢 / 节", 1, 1)}${railNumber("trains", "共用本线路的列车 / 列", 1, 1)}${fluid ? railNumber("fluidCapacity", "单车厢容量 / m³", 1) : railNumber("stack", "物品堆叠上限 / 件", 1, 1)}${railNumber("pause", "每站装卸暂停 / 秒")}${railNumber("loadRate", "装货：每站台接口合计 / " + unit(r.item))}${railNumber("unloadRate", "卸货：每站台接口合计 / " + unit(r.item))}</div><p class="small">往返时间从同一站的一次发车量到下一次发车，包含去程、回程、装卸、等待和堵车。每节货运车厢在两端各对应一个站台；车头不计入车厢数。</p><div class="buttons rail-presets"><span>两端接口快捷设置：</span>${(fluid ? [300, 600] : [60, 120, 270, 480, 780, 1200]).map((v) => `<button data-rail-port="${v}">单${fluid ? "管" : "带"} ${v}</button><button data-rail-port="${v * 2}">双${fluid ? "管" : "带"} ${v}×2</button>`).join("")}</div><p class="small">接口合计按一个站台填写，最多同方向两条带／管。多车厢自动乘站台数。选择物品时载入堆叠上限；容量可按游戏版本或模组修改。</p></div>
+ <div class="panel"><h3>01 / 运输物资</h3><div class="formgrid"><label>搜索物品<input id="railSearch" type="search" placeholder="中文 / 英文 / 拼音"></label><label>货物<select id="railItem"></select></label>${railNumber("demand", "需求 / " + unit(r.item))}${railNumber("margin", "预留运力 / %")}</div><div class="buttons" style="margin-top:14px"><button id="railImportSupply">带入当前物品的主产线外供需求</button><button id="railImportProduct">带入当前物品的目标产量</button><span id="railImportMessage" role="status"></span></div></div>
+ <div class="panel"><h3>02 / 列车与站台</h3><div class="formgrid">${railNumber("minutes", "实测完整往返 / 分钟", 0.01)}${railNumber("wagons", "每列货运车厢 / 节", 1, 1)}${railNumber("trains", "共用本线路的列车 / 列", 1, 1)}${fluid ? railNumber("fluidCapacity", "单车厢容量 / m³", 1) : railNumber("stack", "物品堆叠上限 / 件", 1, 1)}${railNumber("pause", "每站装卸暂停 / 秒")}${railNumber("loadRate", "装货：每站台接口合计 / " + unit(r.item))}${railNumber("unloadRate", "卸货：每站台接口合计 / " + unit(r.item))}</div><div class="buttons rail-presets"><span>两端接口快捷设置：</span>${(fluid ? [300, 600] : [60, 120, 270, 480, 780, 1200]).map((v) => `<button data-rail-port="${v}">单${fluid ? "管" : "带"} ${v}</button><button data-rail-port="${v * 2}">双${fluid ? "管" : "带"} ${v}×2</button>`).join("")}</div></div>
  <div id="railResults" aria-live="polite"></div><details class="panel"><summary>计算规则与数据</summary><p>均匀发车，所有列车编组相同，每圈在装、卸站各停靠一次；没有其他线路争用站台。班次间隔 H = 往返秒数 ÷ 列车数；站台可输送比例 F = 1 − 暂停秒数 ÷ H。</p><p>单车厢每分钟有效运力 = min（容量 × 60 ÷ H，装货接口合计 × F，卸货接口合计 × F）。同一站台每次到站只扣一次暂停；往返时间已包含两端装卸，不重复扣除。</p><p>固体容量为 32 格 × 堆叠上限。流体默认 2400 m³；旧版可手动改为 1600。装卸暂停默认 27.08 秒。物品堆叠上限取本页内置游戏 Docs；<a href="https://satisfactory.wiki.gg/wiki/Train_throughput" target="_blank" rel="noopener">车厢与暂停时间参考</a> · <a href="https://satisfactory.wiki.gg/wiki/Freight_Platform" target="_blank" rel="noopener">站台接口参考</a>。</p><p>结果是稳定运行的理论上限。增开列车后应重新测量往返时间；不模拟铁路信号、坡度、牵引功率、混装、其他线路抢占或流体晃动。应配置外部缓冲，并确保上下游带／管能达到填写的接口速率。</p></details>`;
   railItemOptions();
   renderRailResults();
@@ -5172,7 +5407,7 @@ function renderRailResults() {
        `<div><span>${name} / 全线路</span><b>${fmt(value * r.wagons)} ${u}</b></div>`,
    )
    .join("")}</div></div>
- <div class="panel"><h3>04 / 按需求反推</h3><div class="rail-limits"><div><span>保持 ${r.trains} 列火车，每列至少</span><b>${m.needed === null ? "当前时刻表或接口无解" : m.needed + " 节货运车厢"}</b></div><div><span>保持每列 ${r.wagons} 节，至少</span><b>${r.demand === 0 ? "0 列火车" : trains === null ? "1–1000 列内无可行解" : trains + " 列火车"}</b></div><div><span>当前配置每端需要</span><b>${r.wagons} 个货运站台</b></div></div><div class="buttons" style="margin-top:14px">${m.needed > 0 && m.needed <= 1000 ? `<button data-rail-apply="wagons" data-value="${m.needed}">应用建议车厢数</button>` : ""}${trains && r.demand > 0 ? `<button data-rail-apply="trains" data-value="${trains}">应用建议列车数</button>` : ""}</div><p class="small">两个建议分别固定另一参数，均包含预留运力。增加列车会缩短间隔，也会增加站台暂停占比；接口不足时应增加车厢与对应站台，或提高接口速率。</p><p>仅覆盖一次装卸暂停：装货端外部缓冲至少预留 <b>${fmt((r.demand * r.pause) / 60)} ${volume}</b> 空间，卸货端至少备有相同数量。此数仅为暂停期间的缓冲下限，连续供货还需覆盖班次间隔与延误。</p></div>`;
+ <div class="panel"><h3>04 / 按需求反推</h3><div class="rail-limits"><div><span>保持 ${r.trains} 列火车，每列至少</span><b>${m.needed === null ? "当前时刻表或接口无解" : m.needed + " 节货运车厢"}</b></div><div><span>保持每列 ${r.wagons} 节，至少</span><b>${r.demand === 0 ? "0 列火车" : trains === null ? "1–1000 列内无可行解" : trains + " 列火车"}</b></div><div><span>当前配置每端需要</span><b>${r.wagons} 个货运站台</b></div></div><div class="buttons" style="margin-top:14px">${m.needed > 0 && m.needed <= 1000 ? `<button data-rail-apply="wagons" data-value="${m.needed}">应用建议车厢数</button>` : ""}${trains && r.demand > 0 ? `<button data-rail-apply="trains" data-value="${trains}">应用建议列车数</button>` : ""}</div><p>仅覆盖一次装卸暂停：装货端外部缓冲至少预留 <b>${fmt((r.demand * r.pause) / 60)} ${volume}</b> 空间，卸货端至少备有相同数量。此数仅为暂停期间的缓冲下限，连续供货还需覆盖班次间隔与延误。</p></div>`;
 }
 function initRail() {
   const el = $("railTab");
@@ -5242,7 +5477,7 @@ let machineSupplyUndo = null;
 function machineSupplyButton(id, recipe) {
   if (state.mode === "forward" || !I[id]?.selectable || isPowerItem(id))
     return "";
-  const final = state.products.some((p) => p.id === id);
+  const final = hasProductMaterial(id);
   return `<button class="machine-supply-button" data-machine-supply="${esc(id)}" data-supply-recipe="${esc(recipe)}" title="${final ? "转为外部供给，并从最终产物移除" : "设为外部供给起点，不再自动制造此物品"}">${final ? "转为供给（移出产物）" : "加入供给"}</button>`;
 }
 function machineInputsCell(row) {
@@ -5276,8 +5511,8 @@ function convertMachineOutputToSupply(id, k) {
     q = row?.outs[id];
   if (!(q > EPS)) return;
   const before = JSON.parse(JSON.stringify(state)),
-    removed = state.products.some((p) => p.id === id);
-  state.products = state.products.filter((p) => p.id !== id);
+    removed = hasProductMaterial(id);
+  state.products = state.products.filter((p) => materialId(p.id) !== id);
   let entry = state.supplies.find((p) => p.id === id);
   const old = entry?.q || 0;
   if (!entry) {
@@ -5342,9 +5577,11 @@ function initMachineSupply() {
 }
 
 function sloopControl(row) {
-  const a = amplification(row.k);
-  if (!a.slots) return "";
-  return `<div class="sloop-control"><label>每台索莫晶体 <input type="number" min="0" max="${a.slots}" step="1" value="${a.count}" data-sloop="${esc(row.k)}" aria-label="${esc(R[row.k].name)}每台索莫晶体数量"> / ${a.slots}</label><small>产出 ×${fmt(a.boost)} · 耗电 ×${fmt(a.boost ** 2)} · 本组需 ${row.n * a.count} 枚</small></div>`;
+  const parent = recipeBase(row.k), a = amplification(row.k);
+  if (R[row.k].groupParent) return `<div class="sloop-control"><b>组 ${R[row.k].groupId} · 每台 ${a.count} 枚晶体</b><small>产出 ×${fmt(a.boost)} · 耗电 ×${fmt(a.boost ** 2)} · 本组安装 ${row.n * a.count} 枚</small><button data-machine-groups="${esc(parent)}">编辑同配方分组</button></div>`;
+  const groupsButton = state.machineGroupsEnabled ? `<button data-machine-groups="${esc(parent)}">机器分组配置</button>` : "";
+  if (!a.slots) return groupsButton;
+  return groupsButton + `<div class="sloop-control"><label>每台索莫晶体 <input type="number" min="0" max="${a.slots}" step="1" value="${displayNumber(a.count)}" data-sloop="${esc(row.k)}" aria-label="${esc(R[row.k].name)}每台索莫晶体数量"> / ${a.slots}</label><small>产出 ×${fmt(a.boost)} · 耗电 ×${fmt(a.boost ** 2)} · 本组需 ${row.n * a.count} 枚</small></div>`;
 }
 function initAmplification() {
   document.addEventListener("change", (e) => {
@@ -5366,9 +5603,10 @@ function initAmplification() {
 
 function machineClockControl(row) {
   if (!state.over) return "";
+  if (R[row.k].groupParent) return `<small class="machine-clock-control">本组频率 ${fmt(machineClock(row.k))}% · 在分组配置中修改</small>`;
   const b = R[row.k].b,
     custom = Object.hasOwn(state.machineClocks || {}, b);
-  return `<div class="machine-clock-control"><label>本类频率 % <input type="number" min="1" max="250" step="any" value="${custom ? state.machineClocks[b] : ""}" placeholder="${fmt(machineClock(row.k))}" data-clocktype="${esc(b)}" aria-label="${esc(B[b].name)}本类频率" title="适用于全部同类机器，范围 1–250%；留空恢复全局频率。"></label><small>${custom ? "本类单独设置" : "跟随全局频率"} · ${esc(B[b].name)}</small>${custom ? `<button data-clockreset="${esc(b)}">恢复全局</button>` : ""}<small>按此频率配置整台机器，末台自动降频。</small></div>`;
+  return `<div class="machine-clock-control"><label>本类频率 % <input type="number" min="1" max="250" step="any" value="${displayNumber(custom ? state.machineClocks[b] : "")}" placeholder="${fmt(machineClock(row.k))}" data-clocktype="${esc(b)}" aria-label="${esc(B[b].name)}本类频率" title="适用于全部同类机器，范围 1–250%；留空恢复全局频率。"></label><small>${custom ? "本类单独设置" : "跟随全局频率"} · ${esc(B[b].name)}</small>${custom ? `<button data-clockreset="${esc(b)}">恢复全局</button>` : ""}<small>按此频率配置整台机器，末台自动降频。</small></div>`;
 }
 function initMachineClocks() {
   document.addEventListener("change", (e) => {
@@ -5402,7 +5640,7 @@ function renderConstraintChoices(query = "") {
     ids = ITEM_IDS.filter(
       (id) =>
         id !== "Workbench_Electricity" &&
-        !state.products.some((p) => p.id === id) &&
+        !hasProductMaterial(id) &&
         itemMatch(id, query),
     );
   $("constraintItem").innerHTML = [...new Set([selected, ...ids])]
@@ -5418,7 +5656,7 @@ function renderInputConstraint() {
   panel.hidden = state.mode !== "constrained";
   if (panel.hidden) return;
   renderConstraintChoices($("constraintSearch").value);
-  $("constraintAmount").value = cleanComputedQuantity(state.inputConstraint.q);
+  $("constraintAmount").value = displayNumber(state.inputConstraint.q);
   $("constraintSummary").textContent =
     I[state.inputConstraint.id].name +
     " ≤ " +
@@ -5504,8 +5742,8 @@ const $ = (id) => document.getElementById(id),
         })[c],
     ),
   fmt = (x) =>
-    new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 4 }).format(
-      Math.abs(x || 0) < 1e-7 ? 0 : x,
+    new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 3 }).format(
+      Math.abs(x || 0) < 0.0005 ? 0 : x,
     ),
   unit = (id) => (isPowerItem(id) ? "MW" : I[id]?.fluid ? "m³/分" : "件/分");
 let current = null,
@@ -5517,6 +5755,7 @@ let current = null,
   graphMode = "network",
   dirtyGraph = true;
 function icon(id, large = false) {
+  id = materialId(id);
   const src = ICONS[id] || ICONS[id?.replace("Build_", "Desc_")];
   return src
     ? `<img class="icon${large ? " large" : ""}" src="${src}" alt="${esc(I[id]?.name || B[id]?.name || id)}" loading="lazy">`
@@ -5546,6 +5785,7 @@ function itemMatch(id, q) {
   );
 }
 function recipeMatch(k, q) {
+  if (R[k]?.groupParent) return false;
   const r = R[k],
     str = [r.name, r.en, r.py, r.initials, k]
       .join(" ")
@@ -5565,7 +5805,14 @@ function safeState(x) {
     throw Error(
       "请导入新版工作台方案（version 12）。旧版方案请保留原文件查看。",
     );
+  for (const product of x.products || []) ensureProductItem(product.id);
   const s = fresh();
+  s.geothermal = normalizeGeothermal(x.geothermal);
+  s.optimizationSettings = normalizeOptimizationSettings(x.optimizationSettings);
+  s.optimizationReport = x.optimizationReport && Number.isFinite(x.optimizationReport.points) ? copy(x.optimizationReport) : null;
+  s.machineGroups = normalizeMachineGroups(x.machineGroups);
+  s.machineGroupsEnabled = typeof x.machineGroupsEnabled === "boolean" ? x.machineGroupsEnabled : Object.keys(s.machineGroups).length > 0;
+  for (const key of Object.keys(s.machineGroups)) groupedRecipes(key, s);
   for (const k of ["over", "strict", "autoPin", "event"])
     s[k] = typeof x[k] === "boolean" ? x[k] : s[k];
   s.clock = Math.max(1, Math.min(s.over ? 250 : 100, amount(x.clock) || 100));
@@ -5585,8 +5832,16 @@ function safeState(x) {
   s.products = (x.products || [])
     .filter((p) => I[p.id]?.selectable && !seen.has(p.id) && seen.add(p.id))
     .map((p) => ({ id: p.id, q: amount(p.q), lock: !!p.lock, pin: !!p.pin }));
+  const supplySeen = new Set();
   s.supplies = (x.supplies || [])
-    .filter((p) => I[p.id]?.selectable && !seen.has(p.id) && seen.add(p.id))
+    .filter(
+      (p) =>
+        I[p.id]?.selectable &&
+        !I[p.id]?.baseItem &&
+        (!hasProductMaterial(p.id, s) || I[p.id]?.raw) &&
+        !supplySeen.has(p.id) &&
+        supplySeen.add(p.id),
+    )
     .map((p) => ({ id: p.id, q: amount(p.q), stop: p.stop !== false }));
   s.selected = Object.fromEntries(
     Object.entries(x.selected || {}).filter(
@@ -5594,11 +5849,12 @@ function safeState(x) {
         I[id] &&
         (k === "" ||
           (R[k]?.kind === "machine" &&
-            (R[k].outs[id] > 0 || (isPowerItem(id) && R[k].generation)))),
+            (R[k].outs[materialId(id)] > 0 ||
+              (isPowerItem(id) && R[k].generation)))),
     ),
   );
   s.nodes = (x.nodes || [])
-    .filter((n) => I[n.item]?.raw && !s.products.some((p) => p.id === n.item))
+    .filter((n) => I[n.item]?.raw && !hasProductMaterial(n.item, s))
     .map((n, i) =>
       normalizeNode({
         ...n,
@@ -5616,7 +5872,7 @@ function safeState(x) {
     }));
   s.built = Object.fromEntries(
     Object.entries(x.built || {})
-      .filter(([k]) => /^(recipe|node|press|gen):/.test(k))
+      .filter(([k]) => /^(recipe|node|press|gen|geo):/.test(k))
       .map(([k, v]) => [k, Math.floor(amount(v))]),
   );
   s.transport = {
@@ -5706,10 +5962,6 @@ function openPicker(type) {
     product: "添加最终产物",
     node: "添加资源点 / 抽水站",
   }[type];
-  $("pickerHint").textContent =
-    type === "node"
-      ? "输入资源名称，再选择纯度和采集设备。"
-      : "支持中文、英文、全拼和首字母。已添加或与最终产物冲突的项目不会重复显示。";
   $("pickerSearch").value = "";
   renderPicker();
   $("picker").showModal();
@@ -5721,21 +5973,16 @@ function renderPicker() {
   if (pickerType === "supply")
     list = list.filter(
       (id) =>
-        !state.products.some((p) => p.id === id) &&
-        !state.supplies.some((p) => p.id === id),
+        !hasProductMaterial(id) && !state.supplies.some((p) => p.id === id),
     );
   if (pickerType === "product")
     list = list.filter(
       (id) =>
-        (id === "Workbench_Electricity" ||
-          !state.products.some((p) => p.id === id)) &&
         !state.supplies.some((p) => p.id === id) &&
         !state.nodes.some((n) => n.item === id),
     );
   if (pickerType === "node")
-    list = list.filter(
-      (id) => I[id].raw && !state.products.some((p) => p.id === id),
-    );
+    list = list.filter((id) => I[id].raw && !hasProductMaterial(id));
   list.sort((a, b) => I[a].name.localeCompare(I[b].name, "zh-CN"));
   $("pickerResults").innerHTML =
     list
@@ -5748,13 +5995,16 @@ function renderPicker() {
     '<div class="empty">没有匹配项目。可以尝试英文名称或拼音。</div>';
 }
 function addPicked(id) {
-  if (pickerType === "product" && isPowerItem(id)) {
-    id = nextPowerItem();
+  if (pickerType === "product") {
+    const base = materialId(id),
+      chosen = recipeFor(base);
+    id = nextProductItem(base);
     if (!id) {
-      setStatus("发电量卡片数量已达上限。", true);
+      setStatus("产物卡片数量已达上限。", true);
       return;
     }
-    state.selected[id] = defaultPowerRecipe(state);
+    if (isPowerItem(id)) state.selected[id] = defaultPowerRecipe(state);
+    else if (I[id]?.baseItem) state.selected[id] = chosen;
   }
   if (pickerType === "supply") state.supplies.push({ id, q: 0, stop: true });
   if (pickerType === "product")
@@ -5789,7 +6039,7 @@ function controls() {
   for (const k of ["over", "strict", "event", "autoPin"])
     $(k).checked = state[k];
   for (const k of ["mode", "sort", "clockNum", "powerMult"])
-    $(k).value = state[k === "clockNum" ? "clock" : k];
+    $(k).value = displayNumber(state[k === "clockNum" ? "clock" : k]);
   $("clock").max = $("clockNum").max = state.over ? 250 : 100;
   $("clock").value = state.clock;
   $("applyReverse").hidden = state.mode === "forward";
@@ -5800,7 +6050,7 @@ function renderSupplies() {
     state.supplies
       .map(
         (x) =>
-          `<div class="card"><div class="top"><div class="itemhead">${icon(x.id)}<div><b>${esc(I[x.id].name)}</b><small style="display:block">${esc(I[x.id].en)}</small></div></div><button data-delsupply="${x.id}" aria-label="移除${esc(I[x.id].name)}">×</button></div><label class="rowfield">${unit(x.id)}<input data-supply="${x.id}" type="number" min="0" max="100000000" step="any" value="${cleanComputedQuantity(x.q)}"></label><label class="small"><input data-stop="${x.id}" type="checkbox" ${x.stop ? "checked" : ""}> 作为产线起点，不再制造此物品</label></div>`,
+          `<div class="card"><div class="top"><div class="itemhead">${icon(x.id)}<div><b>${esc(I[x.id].name)}</b><small style="display:block">${esc(I[x.id].en)}</small></div></div><button data-delsupply="${x.id}" aria-label="移除${esc(I[x.id].name)}">×</button></div><label class="rowfield">${unit(x.id)}<input data-supply="${x.id}" type="number" min="0" max="100000000" step="any" value="${displayNumber(cleanComputedQuantity(x.q))}"></label><label class="small"><input data-stop="${x.id}" type="checkbox" ${x.stop ? "checked" : ""}> 作为产线起点，不再制造此物品</label></div>`,
       )
       .join("") || '<div class="empty">尚未添加外部供给</div>';
 }
@@ -5836,7 +6086,7 @@ function renderNodes() {
           )
           .join(
             "",
-          )}</select></label><label>资源点 / 设备数<input data-node="${n.id}" data-field="count" ${n.mapId ? "disabled" : ""} type="number" min="1" step="1" value="${n.count}"></label><label>单台频率 %<input data-node="${n.id}" data-field="clock" type="number" min="1" max="250" step="any" value="${n.clock}"></label><label>单机出口上限<select data-node="${n.id}" data-field="${fluid ? "pipe" : "belt"}">${(fluid ? [300, 600] : [60, 120, 270, 480, 780, 1200]).map((q) => `<option value="${q}"${q === (fluid ? n.pipe : n.belt) ? " selected" : ""}>${q} ${unit(n.item)}</option>`).join("")}</select></label>${n.machine === "well" ? `<label>增压站数<input data-node="${n.id}" data-field="pressurizers" ${n.mapCore ? "disabled" : ""} type="number" min="0" step="1" value="${n.pressurizers}"></label>` : ""}</div><p><b>${fmt(v.output)} ${unit(n.item)}</b> · ${fmt(v.power * state.powerMult)} MW</p>${v.limited ? '<small class="over">受出口带速 / 管速限制；理论 ' + fmt(v.theoretical) + "</small>" : ""}${n.mapId ? `<button data-map-focus="${esc(n.mapId)}">在地图定位</button>` : ""}${n.machine === "well" ? '<p class="small">设备数填卫星井数量。同一增压站下不同纯度可分行，增压站数量只在其中一行计入。</p>' : ""}</div>`;
+          )}</select></label><label>资源点 / 设备数<input data-node="${n.id}" data-field="count" ${n.mapId ? "disabled" : ""} type="number" min="1" step="1" value="${displayNumber(n.count)}"></label><label>单台频率 %<input data-node="${n.id}" data-field="clock" type="number" min="1" max="250" step="any" value="${displayNumber(n.clock)}"></label><label>单机出口上限<select data-node="${n.id}" data-field="${fluid ? "pipe" : "belt"}">${(fluid ? [300, 600] : [60, 120, 270, 480, 780, 1200]).map((q) => `<option value="${q}"${q === (fluid ? n.pipe : n.belt) ? " selected" : ""}>${q} ${unit(n.item)}</option>`).join("")}</select></label>${n.machine === "well" ? `<label>增压站数<input data-node="${n.id}" data-field="pressurizers" ${n.mapCore ? "disabled" : ""} type="number" min="0" step="1" value="${displayNumber(n.pressurizers)}"></label>` : ""}</div><p><b>${fmt(v.output)} ${unit(n.item)}</b> · ${fmt(v.power * state.powerMult)} MW</p>${v.limited ? '<small class="over">受出口带速 / 管速限制；理论 ' + fmt(v.theoretical) + "</small>" : ""}${n.mapId ? `<button data-map-focus="${esc(n.mapId)}">在地图定位</button>` : ""}${n.machine === "well" ? '' : ""}</div>`;
       })
       .join("") || '<div class="empty">尚未添加资源点</div>';
 }
@@ -5860,7 +6110,7 @@ function renderProducts() {
     productOrder()
       .map(
         (p) =>
-          `<div class="card${p.q > EPS ? " active" : ""}${p.lock ? " locked" : ""}" id="product-${p.id}"><div class="top"><div class="itemhead">${icon(p.id)}<div><h3>${esc(I[p.id].name + (isPowerItem(p.id) ? " · " + (R[recipeFor(p.id)]?.name || "") : ""))}</h3><small>${esc(I[p.id].en)}</small></div></div><div class="actions"><button data-pin="${p.id}" class="${p.pin ? "pinon" : ""}" aria-pressed="${p.pin}">${p.pin ? "已置顶" : "置顶"}</button><button data-lock="${p.id}" aria-pressed="${p.lock}">${p.lock ? "已锁定" : "锁定"}</button><button data-delproduct="${p.id}" aria-label="删除产物">×</button></div></div>${isPowerItem(p.id) ? '<p class="small">发电量可以重复添加；每张卡片独立选择燃料和电量，总发电量在上方合计。</p>' : ""}${recipeSelect(p.id)}<div class="amountline"><input type="number" min="0" max="100000000" step="any" data-quantity="${p.id}" value="${+p.q.toFixed(8)}" ${p.lock ? "disabled" : ""} aria-label="${esc(I[p.id].name)}产量"><small>${unit(p.id)}</small><button data-maxproduct="${p.id}" ${p.lock ? "disabled" : ""}>${state.mode === "reverse" ? "反推此产量" : isPowerItem(p.id) ? "剩余资源优先发电" : "优先分配"}</button></div><input type="range" min="0" max="${Math.max(100, Math.ceil(p.q * 1.5))}" step="1" value="${Math.round(p.q)}" data-slider="${p.id}" ${p.lock ? "disabled" : ""} aria-label="${esc(I[p.id].name)}整数产量滑条"><div id="single-${p.id}" class="small"></div><div id="cap-${p.id}" class="small"></div></div>`,
+          `<div class="card${p.q > EPS ? " active" : ""}${p.lock ? " locked" : ""}" id="product-${p.id}"><div class="top"><div class="itemhead">${icon(p.id)}<div><h3>${esc(productTitle(p.id))}</h3><small>${esc(I[p.id].en)}</small></div></div><div class="actions"><button data-pin="${p.id}" class="${p.pin ? "pinon" : ""}" aria-pressed="${p.pin}">${p.pin ? "已置顶" : "置顶"}</button><button data-lock="${p.id}" aria-pressed="${p.lock}">${p.lock ? "已锁定" : "锁定"}</button><button data-duplicate-product="${p.id}" title="添加同物品的独立产物卡片">＋</button><button data-delproduct="${p.id}" aria-label="删除产物">×</button></div></div>${isPowerItem(p.id) ? '' : ""}${recipeSelect(p.id)}<div class="amountline"><input type="number" min="0" max="100000000" step="any" data-quantity="${p.id}" value="${displayNumber(+p.q.toFixed(3))}" ${p.lock ? "disabled" : ""} aria-label="${esc(I[p.id].name)}产量"><small>${unit(p.id)}</small><button data-maxproduct="${p.id}" ${p.lock ? "disabled" : ""}>${state.mode === "reverse" ? "反推此产量" : isPowerItem(p.id) ? "剩余资源优先发电" : "优先分配"}</button></div><input type="range" min="0" max="${Math.max(100, Math.ceil(p.q * 1.5))}" step="1" value="${Math.round(p.q)}" data-slider="${p.id}" ${p.lock ? "disabled" : ""} aria-label="${esc(I[p.id].name)}整数产量滑条"><div id="single-${p.id}" class="small"></div><div id="cap-${p.id}" class="small"></div></div>`,
       )
       .join("") ||
     '<div class="empty">尚未添加产物。搜索添加你想生产的物品。</div>';
@@ -5903,6 +6153,11 @@ function lastMachineOutputText(row) {
     .join("；");
 }
 function machineLabel(row) {
+  if (R[row.k]?.groupParent) {
+    const active = row.activeN || 0;
+    const tail = row.tail ? ' · 末台 ' + fmt(row.tail * 100) + '%' : '';
+    return `配置 ${fmt(row.n)} 台 × ${fmt(row.cap * 100)}% · 运行 ${fmt(active)} 台${tail}`;
+  }
   const a = [];
   if (row.full) a.push(`${fmt(row.full)}台 × ${fmt(row.cap * 100)}%`);
   if (row.tail)
@@ -5918,14 +6173,17 @@ function renderResults() {
   graphPreview = null;
   refreshSingleOutput();
   const p = current;
+  renderMachineGroupProfiles();
   $("stats").innerHTML = [
     ["生产机器 / 台", p ? fmt(p.machines) : "—"],
     ["平均耗电 / MW", p ? fmt(p.power) : "—"],
     ["峰值耗电 / MW", p ? fmt(p.peak) : "—"],
     ["能量碎片", p ? fmt(p.shards) : "—"],
     ["使用索莫晶体", p ? fmt(p.sloopTotal) : "—"],
-    ["发电量 / MW", p ? fmt(p.generation) : "—"],
-    ["净余电 / MW", p ? fmt(p.generation - p.power - state.extraLoad) : "—"],
+    ["总平均发电 / MW", p ? fmt(p.generation) : "—"],
+    ["地热平均 / MW", fmt(geothermalPower().average)],
+    ["外部电力 / MW", p ? fmt(p.importedPower || 0) : "—"],
+    ["净余电 / MW", p ? fmt(p.generation + (p.importedPower || 0) - p.power - state.extraLoad) : "—"],
   ]
     .map(
       ([k, v]) =>
@@ -5961,11 +6219,11 @@ function renderResults() {
   $("machines").innerHTML =
     machineDisplayOrder(p.rows, state, p)
       .map((row) => {
-        const main = R[row.k].generation
-          ? state.products.find(
-              (p) => isPowerItem(p.id) && recipeFor(p.id) === row.k,
-            )?.id || "Workbench_Electricity"
-          : Object.keys(R[row.k].outs)[0];
+        const main =
+          state.products.find(
+            (p) =>
+              recipeFor(p.id) === recipeBase(row.k) && R[row.k].outs[materialId(p.id)] > 0,
+          )?.id || Object.keys(R[row.k].outs)[0];
         return `<tr id="machine-${row.k}" class="${machineIsBuilt(row) ? "machine-built" : ""}"><td class="wrap"><div class="itemhead">${icon(R[row.k].b)}<div>${esc(B[R[row.k].b]?.name)}<br><small>${esc(R[row.k].name)}</small>${row.flowCycle ? '<div class="badge">循环回流</div>' : ""}${machineIsBuilt(row) ? '<div class="badge" style="margin-top:6px">✓ 已建成</div>' : ""}</div></div>${recipeSelect(main, "recipe-choice")}</td><td class="wrap machine-materials"><div class="machine-material-label">输入材料 · 本组总需求</div>${machineInputsCell(row)}<div class="machine-material-label machine-output-label">输出产物</div>${machineOutputsCell(row)}</td><td class="wrap">${machineLabel(row)}<div class="small" style="margin-top:8px"><b>末台${row.duty < 0.999999 ? "平均" : ""}产出：</b>${esc(lastMachineOutputText(row))}</div>${machineClockControl(row)}${sloopControl(row)}</td><td>${row.shards}</td><td>${R[row.k].generation ? "发电 " + fmt(row.outs.Workbench_Electricity || 0) + " MW" : fmt(row.power) + " / " + fmt(row.peak)}</td>${machineBuildCells(row)}</tr>`;
       })
       .join("") || '<tr><td colspan="7">暂无生产机器。</td></tr>';
@@ -5980,9 +6238,7 @@ function renderResults() {
       .join("") +
     "</div>" +
     (surplus.length ? "" : "<p>没有多余副产物。</p>");
-  const water = "Desc_Water_C";
-  $("processBalance").innerHTML =
-    `<div class="chipline"><span class="chip">新鲜水需求 <b>${fmt(p.external[water] || 0)} m³/分</b></span><span class="chip">工序产水 <b>${fmt(p.output[water] || 0)} m³/分</b></span><span class="chip">工序用水 <b>${fmt(p.input[water] || 0)} m³/分</b></span><span class="chip">可内部回用 <b>${fmt(Math.min(p.output[water] || 0, p.input[water] || 0))} m³/分</b></span></div>`;
+  renderReuseAndStartup(p);
   renderBill();
   if (!$("graphTab").hidden) renderGraph();
   save();
@@ -6019,12 +6275,14 @@ function renderProcess() {
       .join("");
 }
 function renderAll() {
+  renderOptimizationPlanSummary();
   restoreOrphanRecipes();
   if ($("settingsTab")) renderMultiplierSettings();
   normalizeMappedGroups();
   controls();
   renderSupplies();
   renderNodes();
+  renderGeothermal();
   renderProducts();
   renderProcess();
   renderResults();
@@ -6330,7 +6588,7 @@ function renderGraph() {
               ? "最终产物"
               : "副产物 / 待外送",
       info = n.row ? machineLabel(n.row) : fmt(n.q) + " " + unit(n.item);
-    svg += `<g ${graphPreview && n.id === "e:" + graphPreview.item ? `data-missing-node="${graphPreview.item}" role="button" tabindex="0" style="cursor:pointer"` : ""}><title>${esc(n.label + " · " + sub + " · " + info)}</title><rect x="${n.x}" y="${n.y}" width="270" height="105" rx="10" fill="${highlight.nodes.has(n.id) ? "#fff0e9" : fill}" stroke="${highlight.nodes.has(n.id) ? "#c52d20" : stroke}" stroke-width="${highlight.nodes.has(n.id) ? 3 : 1}"/>${ICONS[n.item] ? `<image href="${ICONS[n.item]}" x="${n.x + 10}" y="${n.y + 14}" width="35" height="35"/>` : ""}<text x="${n.x + 52}" y="${n.y + 28}" font-size="13" fill="#18262b">${esc(label)}</text><text x="${n.x + 52}" y="${n.y + 47}" font-size="11" fill="#50666e">${esc(sub)}</text><text x="${n.x + 12}" y="${n.y + 78}" font-size="11" fill="#20353e">${esc(info)}</text></g>`;
+    svg += `<g ${graphPreview && n.id === "e:" + graphPreview.item ? `data-missing-node="${graphPreview.item}" role="button" tabindex="0" style="cursor:pointer"` : ""}><title>${esc(n.label + " · " + sub + " · " + info)}</title><rect x="${n.x}" y="${n.y}" width="270" height="105" rx="10" fill="${highlight.nodes.has(n.id) ? "#fff0e9" : fill}" stroke="${highlight.nodes.has(n.id) ? "#c52d20" : stroke}" stroke-width="${highlight.nodes.has(n.id) ? 3 : 1}"/>${ICONS[materialId(n.item)] ? `<image href="${ICONS[materialId(n.item)]}" x="${n.x + 10}" y="${n.y + 14}" width="35" height="35"/>` : ""}<text x="${n.x + 52}" y="${n.y + 28}" font-size="13" fill="#18262b">${esc(label)}</text><text x="${n.x + 52}" y="${n.y + 47}" font-size="11" fill="#50666e">${esc(sub)}</text><text x="${n.x + 12}" y="${n.y + 78}" font-size="11" fill="#20353e">${esc(info)}</text></g>`;
   }
   svg += "</svg>";
   $("network").innerHTML = svg;
@@ -6526,7 +6784,7 @@ function init() {
     const report = changeQuantity(id, e.target.value, true);
     for (const p of state.products) {
       const input = document.querySelector(`[data-quantity="${p.id}"]`);
-      if (input) input.value = +p.q.toFixed(8);
+      if (input) input.value = +p.q.toFixed(3);
       const slider = document.querySelector(`[data-slider="${p.id}"]`);
       if (slider && p.id !== id) slider.value = Math.round(p.q);
     }
@@ -6632,7 +6890,7 @@ function init() {
         "image/svg+xml",
       );
   };
-  $("export").onclick = exportWorkspace;
+  $("export").onclick = () => exportSinglePlan();
   $("import").onclick = () => $("importFile").click();
   $("importFile").onchange = importWorkspaceFile;
   $("reset").onclick = () => {
@@ -6651,6 +6909,68 @@ function init() {
       );
   };
   renderAll();
+}
+
+// Geothermal power is configured as a finite, supplemental grid source.
+function normalizeGeothermal(value) {
+  const out = {};
+  for (const purity of ["impure", "normal", "pure"]) {
+    const n = Number(value?.[purity]);
+    out[purity] = Number.isFinite(n)
+      ? Math.max(0, Math.min(10000, Math.floor(n)))
+      : 0;
+  }
+  return out;
+}
+function geothermalPower(s = state) {
+  const counts = normalizeGeothermal(s.geothermal);
+  const multiplier = s.generationMult ?? 1;
+  const average =
+    (counts.impure * 100 + counts.normal * 200 + counts.pure * 400) *
+    multiplier;
+  return {
+    average,
+    minimum: average / 2,
+    maximum: average * 1.5,
+    count: Object.values(counts).reduce((a, b) => a + b, 0),
+  };
+}
+function renderGeothermal() {
+  const panel = $("geothermalPanel");
+  if (!panel) return;
+  state.geothermal = normalizeGeothermal(state.geothermal);
+  for (const purity of ["impure", "normal", "pure"])
+    $("geo-" + purity).value = state.geothermal[purity];
+  const g = geothermalPower();
+  $("geothermalStats").innerHTML =
+    `<span class="chip">平均功率 <b>${fmt(g.average)} MW</b></span><span class="chip">最低功率 <b>${fmt(g.minimum)} MW</b></span><span class="chip">最高功率 <b>${fmt(g.maximum)} MW</b></span>`;
+}
+function initGeothermal() {
+  const panel = document.createElement("details");
+  panel.id = "geothermalPanel";
+  panel.className = "stage";
+  panel.innerHTML = `<summary>地热发电</summary><div class="formgrid">${[
+    ["impure", "不纯", "50–150", 100],
+    ["normal", "普通", "100–300", 200],
+    ["pure", "高纯", "200–600", 400],
+  ]
+    .map(
+      ([key, label, range, average]) =>
+        `<label>${label} · 台<input id="geo-${key}" data-geothermal="${key}" type="number" min="0" max="10000" step="1" value="0"><small>标准平均 ${average} MW · 波动 ${range} MW</small></label>`,
+    )
+    .join(
+      "",
+    )}</div><div id="geothermalStats" class="chipline"></div>`;
+  $("nodes").after(panel);
+  panel.addEventListener("change", (event) => {
+    const key = event.target.dataset.geothermal;
+    if (!["impure", "normal", "pure"].includes(key)) return;
+    state.geothermal = normalizeGeothermal({
+      ...state.geothermal,
+      [key]: event.target.value,
+    });
+    renderAll();
+  });
 }
 
 function normalizeMultiplier(value) {
@@ -6685,23 +7005,26 @@ const MULTIPLIER_FIELDS = [
   ],
 ];
 function renderMultiplierSettings() {
+  renderOptimizationSettings();
+  renderMachineGroupProfiles();
+  if ($("enableMachineGroups")) $("enableMachineGroups").checked = !!state.machineGroupsEnabled;
   for (const [key] of MULTIPLIER_FIELDS) {
     const el = $("setting-" + key);
     if (el)
-      el.value =
+      el.value = displayNumber(
         key === "elevator"
           ? state.progress.multiplier
           : key === "hub"
             ? state.progress.hubMultiplier
-            : state[key];
+            : state[key]);
   }
-  if ($("powerMult")) $("powerMult").value = state.powerMult;
+  if ($("powerMult")) $("powerMult").value = displayNumber(state.powerMult);
 }
 function initMultiplierSettings() {
   const page = document.createElement("section");
   page.id = "settingsTab";
   page.hidden = true;
-  page.innerHTML = `<div class="planner-heading"><div><span class="planner-kicker">WORKBENCH SETTINGS</span><h1>设置</h1><p>当前方案的计算倍率 · 自动保存并随配置导出</p></div><button id="resetMultipliers">全部恢复 1×</button></div><div class="panel"><h2>计算倍率</h2><p class="muted">支持 0.01–100×。1× 为标准规则，2× 为两倍，0.5× 为一半。修改后重新计算，目标产量保持不变；供给不足会显示缺口。</p>${MULTIPLIER_FIELDS.map(([key, label, help]) => `<div class="multiplier-setting"><div><label for="setting-${key}"><b>${label}</b></label><p>${help}</p></div><div class="multiplier-value"><input id="setting-${key}" data-multiplier="${key}" type="number" min="0.01" max="100" step="any" value="1" aria-label="${label}"><span>×</span><button data-reset-multiplier="${key}">恢复 1×</button></div></div>`).join("")}<p class="muted">更改阶段倍率后，已有产物目标不会自动覆盖；请在阶段物资页面重新加入规划。消耗倍率低于 1× 时，循环配方可能产生额外余量，请核对回流平衡。</p></div>`;
+  page.innerHTML = `<div class="planner-heading"><div><h1>设置</h1></div><button id="resetMultipliers">全部恢复 1×</button></div><div class="panel"><h2>计算倍率</h2>${MULTIPLIER_FIELDS.map(([key, label, help]) => `<div class="multiplier-setting"><div><label for="setting-${key}"><b>${label}</b></label></div><div class="multiplier-value"><input id="setting-${key}" data-multiplier="${key}" type="number" min="0.01" max="100" step="any" value="1" aria-label="${label}"><span>×</span><button data-reset-multiplier="${key}">恢复 1×</button></div></div>`).join("")}</div>`;
   document.querySelector("main").append(page);
   const legacy = $("powerMult")?.closest("label");
   if (legacy) legacy.hidden = true;
@@ -6740,6 +7063,17 @@ function initMultiplierSettings() {
   renderMultiplierSettings();
 }
 
+document.addEventListener("click", (event) => {
+  const id = event.target.closest("[data-duplicate-product]")?.dataset
+    .duplicateProduct;
+  if (!id) return;
+  const next = nextProductItem(id);
+  if (!next) return;
+  state.selected[next] = recipeFor(id);
+  state.products.push({ id: next, q: 0, lock: false, pin: false });
+  renderAll();
+});
+initGeothermal();
 initMultiplierSettings();
 init();
 initEnhancements();
@@ -6760,8 +7094,12 @@ function refreshSingleOutput() {
       el.textContent = "单台机器产出：未选择机器配方";
       continue;
     }
-    const base =
-        rates(k).outs[isPowerItem(p.id) ? "Workbench_Electricity" : p.id] || 0,
+    if (state.machineGroupsEnabled && state.machineGroups?.[k]) {
+      const ids = groupedRecipes(k), total = ids.reduce((sum, key) => sum + (rates(key).outs[materialId(p.id)] || 0) * machineGroup(key).count * machineClock(key) / 100, 0);
+      el.textContent = '已配置 ' + ids.length + ' 组机器 · 满负荷产出 ' + fmt(total) + ' ' + unit(p.id) + ' · 请在机器明细查看各组';
+      continue;
+    }
+    const base = rates(k).outs[materialId(p.id)] || 0,
       cap = machineClock(k) / 100,
       row = current?.rows.find((x) => x.k === k);
     let text = `单台${B[r.b]?.name || "机器"}产出：100% 时 ${fmt(base)} ${unit(p.id)}`;
@@ -6794,7 +7132,7 @@ function migrateMainPower(s, x) {
     for (const [id, q] of Object.entries(waste))
       if (
         q > 0 &&
-        !s.products.some((p) => p.id === id) &&
+        !hasProductMaterial(id, s) &&
         !s.supplies.some((p) => p.id === id)
       )
         s.products.push({ id, q, lock: false, pin: false });
@@ -6813,6 +7151,76 @@ initMachineSupply();
 
 // Offline Chinese/English UI. Plans retain item/recipe IDs and user-entered text.
 const EN_UI = globalThis.__factoryBundle.translations;
+Object.assign(EN_UI, {
+  "机器分组": "Machine groups", "机器分组配置": "Machine group configuration", "启用机器分组配置": "Enable machine group configuration", "编辑分组": "Edit groups", "编辑同配方分组": "Edit groups for this recipe", "运行方式": "Operating mode", "按需求运行：台数作为上限": "On demand: counts are capacity limits", "固定全开：严格按各组配置运行": "Fixed: run all configured machines", "分组": "Group", "台数": "Machines", "频率 %": "Clock %", "每台晶体数": "Somersloops per machine", "＋ 添加一组": "+ Add group", "应用分组配置": "Apply groups", "恢复统一配置": "Restore uniform configuration", "分组计算规则": "Group calculation rules",
+  "允许同一配方按不同台数、频率和晶体数分组。关闭后保留分组数据，计算恢复统一配置；重新开启后继续使用。固定全开模式可能产生额外产物或供给不足，切换后请检查配平。": "Group one recipe by machine count, clock and Somersloops. Disabling preserves groups and uses uniform settings. Fixed groups may cause surplus or shortages; check the balance after switching.",
+  "开启后，在机器清单点击“机器分组配置”添加。分组配置可在此集中管理。": "Enable groups, then use Machine group configuration in the machine list. Manage existing groups here.",
+  "各组分别计算：输入随运行台数和频率线性变化；产出再乘以该组晶体倍率；耗电按该组频率指数与晶体倍率平方计算，然后逐组求和。": "Calculate each group separately: inputs scale with active machine count and clock; outputs also scale with its amplification. Power uses the clock exponent and squared amplification, then sums across groups.",
+  "按需求运行允许停机和末台降频，台数是各组容量上限；安装的机器和晶体仍按完整配置统计。固定全开会将当前启用配方的全部分组按设定运行，可能产生余量，供给不足时不会悄悄改变分组。": "On-demand mode may idle machines or downclock the last machine within each group's capacity. Installed machines and Somersloops remain counted. Fixed mode runs all configured groups, may create surplus and does not silently change groups when supplies are insufficient.",
+  "同配方分组共享产物和原料池，可共同供应最终产物及其他上游需求。分组设置优先于统一晶体数和本类频率；关闭超频时实际频率不超过 100%，原值保留。发电机的晶体槽位为 0。": "Groups share material pools and can serve final targets and other processes. Group settings override uniform Somersloops and type clocks. Disabling overclocking caps effective clocks at 100% without erasing settings. Generators have no Somersloop slots."
+});
+Object.assign(EN_UI, {
+  "外部电力 / MW": "Imported power / MW",
+  "从其他方案导入供给": "Import supplies from another plan", "产物 → 当前供给": "Outputs → Current supplies", "产物接入当前供给": "Use another plan's outputs as supplies", "源方案": "Source plan", "已有供给处理": "Existing supplies", "替换同物品供给，避免重复计入": "Replace matching supplies to avoid double counting", "叠加到现有供给": "Add to existing supplies", "读取其他方案 JSON": "Read another plan's JSON", "接入当前供给": "Import as supplies", "选择": "Select", "产物 / 单位": "Product / Unit", "源方案可外供 / 分": "Source export capacity / min", "当前外供 / 分": "Current supply / min", "本次接入 / 分": "Amount to import / min", "导入后外供 / 分": "Supply after import / min", "与当前最终产物冲突": "Conflicts with a current target", "没有其他已保存方案，可读取 JSON": "No other saved plans; load a JSON file", "请先保存另一份方案，或读取导出的 JSON 配置。": "Save another plan first, or read an exported JSON configuration.", "源方案不可行，无法确认可外供产量。请先修正源方案。": "The source plan is infeasible. Fix it before importing its export capacity.", "以下为源方案的规划外供量，尚不代表已建成或已接通运输；电力按平均净余电计算。": "These are planned exports, not proof of completed construction or transport. Electricity uses average net surplus.", "源方案没有可接入的最终产物或净余电。": "The source plan has no final outputs or net power surplus to import.", "接入量需在 0 与源方案可外供量之间。": "Import an amount between zero and the source's export capacity.", "导入为当前方案的外供起点，截断对应上游生产。当前最终产物不会自动删除。同物品的多张产物卡片合并为总量。": "Imported items become external supply boundaries. Existing targets are not deleted. Multiple target cards for the same material are combined.", "这是独立快照，不会从源方案扣减，也不会自动跟随源方案更新。若供给多个接收方案，请自行分配总量，避免重复分配。不会导入供货工厂的机器、原矿或耗电。": "This is an independent snapshot: it neither deducts from nor follows changes to the source plan. Allocate capacity across recipients to avoid double allocation. Source machines, raw inputs and power consumption are not imported."
+});
+Object.assign(EN_UI, {
+  "↶ 撤销": "↶ Undo", "↷ 重做": "↷ Redo", "撤销（Ctrl+Z / ⌘Z）": "Undo (Ctrl+Z / ⌘Z)", "重做（Ctrl+Y / Ctrl+Shift+Z / ⌘Shift+Z）": "Redo (Ctrl+Y / Ctrl+Shift+Z / ⌘Shift+Z)",
+  "已重做，产线已重新计算。": "Redone. The production plan has been recalculated.", "已撤销，产线已重新计算。": "Undone. The production plan has been recalculated."
+});
+Object.assign(EN_UI, {
+  添加同物品的独立产物卡片: "Add another independent target for this item",
+  "支持中文、英文、全拼和首字母。同一物品可重复添加为独立产物卡片，分别选择配方。":
+    "Search in Chinese, English or pinyin. Add the same item repeatedly as independent targets with separate recipes.",
+});
+Object.assign(EN_UI, {
+  当前配方详情: "Current recipe details",
+  候选配方详情: "Candidate recipe details",
+  "单台机器 · 100% 频率": "One machine · 100% clock",
+  输入材料: "Inputs",
+  输出产物: "Outputs",
+  "该物料从外部供给取得，不配置生产机器。":
+    "This item is supplied externally; no production machine is configured.",
+  "配方详情按单台 100% 频率显示，计入当前消耗／发电倍率及该配方的索莫晶体设置；下方为固定目标产量的整条产线对比。":
+    "Recipe details show one machine at 100% clock, including current consumption/generation multipliers and Somersloops for that recipe. The tables below compare the full production chain at fixed target rates.",
+});
+Object.assign(EN_UI, {
+  副产物: "Byproduct",
+  "产生 / 分": "Produced / min",
+  "内部回用 / 分": "Reused internally / min",
+  "最终产物 / 分": "Final targets / min",
+  "待处理 / 分": "Unhandled / min",
+  "启动供给能力 / 分": "Startup input capacity / min",
+  "稳态外供 / 分": "Steady external input / min",
+  "回用后可减少 / 分": "Reduction after reuse / min",
+  需预充或临时外供: "Preload or temporary supply needed",
+  "按当前已选配方自动配平并优先分配副产物；连接图显示回用去向，剩余量仍需外送或处理。":
+    "The plan balances the selected recipes and allocates byproducts first. Follow reuse paths in the graph; remaining output needs export or disposal.",
+  "当前方案没有产生需要回用的副产物。":
+    "This plan produces no byproducts requiring reuse.",
+  "启动供给能力是假设按当前目标负荷运行、但副产物尚未回到用料端时的保守输入速率，不是一次性预充库存。若该物料没有外部来源，需先预充、临时接入供给或分段启动。回流持续到达、用料机器不停机且缓冲库存不再下降后，再降至稳态外供量。":
+    "Startup capacity is a conservative input rate at the target load before byproducts reach consumers, not a one-time preload quantity. Without an external source, preload, temporary supply or staged startup is needed. Reduce to the steady input rate once recycling is continuous, consumers run without interruption and buffer stock stops falling.",
+  "无法仅凭稳态配方确定几分钟后降频；还取决于首轮生产、运输时间、管道和储罐填充，以及实际回流接法。这里不会自动改写你的外部供给上限。":
+    "Steady-state recipes alone cannot determine when to reduce the clock. Startup cycles, transport, pipe and tank filling, and actual routing also matter. External supply limits are not changed automatically.",
+});
+Object.assign(EN_UI, {
+  地热发电: "Geothermal power",
+  "总平均发电 / MW": "Total average generation / MW",
+  "地热平均 / MW": "Geothermal average / MW",
+  平均功率: "Average power",
+  最低功率: "Minimum power",
+  最高功率: "Maximum power",
+  "不纯 · 台": "Impure · Generators",
+  "普通 · 台": "Normal · Generators",
+  "高纯 · 台": "Pure · Generators",
+  地热发电数据来源: "Geothermal data source",
+  "填写已接入电网的地热机组数量。无需燃料和水，不参与超频或索莫晶体配置；受发电量倍率影响。":
+    "Enter the number of geothermal generators connected to your grid. They use no fuel or water, have no clock or Somersloop settings, and follow the generation multiplier.",
+  "平均值不保证任意时刻都可用。储电设备可缓冲波动；保守供电预算请参考最低功率。此处为额外并网电源，不替代产物卡片指定的燃料发电量，勿重复作为外部电力供给录入。":
+    "Average output is not guaranteed at every instant. Power Storage can buffer fluctuations; use minimum output for a conservative budget. This is supplemental generation and does not replace fuel-specific electricity targets. Do not enter it again as an external electricity supply.",
+  "标准平均 100 MW · 波动 50–150 MW": "Base average 100 MW · Range 50–150 MW",
+  "标准平均 200 MW · 波动 100–300 MW": "Base average 200 MW · Range 100–300 MW",
+  "标准平均 400 MW · 波动 200–600 MW": "Base average 400 MW · Range 200–600 MW",
+});
 Object.assign(EN_UI, {
   "物料需求与产出 / 分": "Material inputs and outputs / min",
   "输入材料 · 本组总需求": "Inputs · Total for this group",
@@ -7143,3 +7551,324 @@ function initGraphFullscreen() {
 }
 
 initGraphFullscreen();
+
+function trimUndoStack(stack) {
+  while (stack.length > 50) stack.shift();
+  let size = stack.reduce((total, snapshot) => total + snapshot.length, 0);
+  while (stack.length > 1 && size > 6 * 1024 * 1024) size -= stack.shift().length;
+}
+function updateUndoButtons() {
+  const undo = $("undoAction"), redo = $("redoAction");
+  if (undo) { undo.disabled = !undoStack.length; undo.setAttribute("aria-disabled", String(undo.disabled)); }
+  if (redo) { redo.disabled = !redoStack.length; redo.setAttribute("aria-disabled", String(redo.disabled)); }
+}
+function recordUndoHistory() {
+  if (!undoReady || undoApplying) return;
+  const next = JSON.stringify(workspacePayload());
+  if (next === undoCurrent) return;
+  const now = Date.now();
+  const merge = undoEventGroup && undoEventGroup === undoPreviousGroup && now - undoPreviousTime < 1200;
+  if (!merge) undoStack.push(undoCurrent);
+  trimUndoStack(undoStack);
+  redoStack = [];
+  undoCurrent = next;
+  undoPreviousGroup = undoEventGroup;
+  undoPreviousTime = now;
+  updateUndoButtons();
+}
+function restoreUndoHistory(direction) {
+  if (!undoReady || undoApplying) return;
+  recordUndoHistory();
+  const source = direction === "redo" ? redoStack : undoStack;
+  const destination = direction === "redo" ? undoStack : redoStack;
+  if (!source.length) return;
+  const snapshot = source[source.length - 1];
+  // Validate before changing either history stack or the active workspace.
+  let restored;
+  try { restored = normalizeWorkspace(JSON.parse(snapshot)); }
+  catch (error) { setStatus("无法恢复该历史记录：" + error.message, true); return; }
+  source.pop();
+  destination.push(undoCurrent);
+  trimUndoStack(destination);
+  undoApplying = true;
+  try {
+    workshop = restored.w;
+    state = restored.s;
+    workspaceReady = true;
+    graphPreview = null;
+    diagnostic = null;
+    comparison = null;
+    machineSupplyUndo = null;
+    for (const id of ["picker", "compareDialog", "missingDialog", "progressDialog", "mapPinDialog", "supplyTransferDialog", "machineGroupsDialog"]) {
+      const dialog = $(id); if (dialog?.open) dialog.close();
+    }
+    renderAll();
+    undoCurrent = JSON.stringify(workspacePayload());
+    undoPreviousGroup = '';
+    undoEventGroup = '';
+    setStatus(direction === "redo" ? "已重做，产线已重新计算。" : "已撤销，产线已重新计算。");
+  } finally { undoApplying = false; updateUndoButtons(); }
+}
+function isNativeUndoField(target) {
+  if (!(target instanceof Element)) return false;
+  if (target.isContentEditable || target.closest('textarea,[contenteditable="true"],[contenteditable=""]')) return true;
+  const input = target.closest('input');
+  return !!input && !['range', 'checkbox', 'radio', 'button', 'submit', 'reset', 'hidden', 'file', 'color'].includes(input.type);
+}
+function initUndoRedo() {
+  const undo = document.createElement('button');
+  undo.id = 'undoAction'; undo.textContent = '↶ 撤销'; undo.title = '撤销（Ctrl+Z / ⌘Z）';
+  undo.setAttribute('aria-keyshortcuts', 'Control+Z Meta+Z');
+  const redo = document.createElement('button');
+  redo.id = 'redoAction'; redo.textContent = '↷ 重做'; redo.title = '重做（Ctrl+Y / Ctrl+Shift+Z / ⌘Shift+Z）';
+  redo.setAttribute('aria-keyshortcuts', 'Control+Y Control+Shift+Z Meta+Shift+Z');
+  $('export').before(undo, redo);
+  undo.onclick = () => restoreUndoHistory('undo');
+  redo.onclick = () => restoreUndoHistory('redo');
+  document.addEventListener('input', event => {
+    const target = event.target;
+    undoEventGroup = target.dataset.slider ? 'slider:' + target.dataset.slider : 'input:' + (target.id || JSON.stringify(target.dataset));
+    queueMicrotask(() => { undoEventGroup = ''; });
+  }, true);
+  document.addEventListener('change', event => {
+    const target = event.target;
+    undoEventGroup = target.dataset.slider ? 'slider:' + target.dataset.slider : 'input:' + (target.id || JSON.stringify(target.dataset));
+    queueMicrotask(() => { undoEventGroup = ''; undoPreviousGroup = ''; });
+  }, true);
+  document.addEventListener('pointerdown', () => { undoPreviousGroup = ''; }, true);
+  document.addEventListener('focusout', () => { undoPreviousGroup = ''; }, true);
+  document.addEventListener('keydown', event => {
+    if (event.defaultPrevented || event.altKey || !(event.ctrlKey || event.metaKey) || isNativeUndoField(event.target)) return;
+    const key = event.key.toLowerCase();
+    const direction = key === 'z' ? (event.shiftKey ? 'redo' : 'undo') : key === 'y' && !event.shiftKey ? 'redo' : null;
+    if (!direction) return;
+    event.preventDefault();
+    restoreUndoHistory(direction);
+  });
+  undoCurrent = JSON.stringify(workspacePayload());
+  undoReady = true;
+  updateUndoButtons();
+}
+initUndoRedo();
+
+let importedSupplySources = [], supplyTransferSources = [], supplyTransferRows = [];
+function supplySourceProducts(sourceState) {
+  const amounts = canonicalDemands(demands(sourceState));
+  delete amounts.Workbench_Electricity;
+  const plan = summarize(planSolve(demands(sourceState), sourceState, { mode: sourceState.mode }), sourceState);
+  // Electricity can be exported only after this plan's own average demand.
+  if (plan) {
+    const net = Math.max(0, plan.generation + (plan.importedPower || 0) - plan.power - (sourceState.extraLoad || 0));
+    if (net > EPS) amounts.Workbench_Electricity = net;
+  }
+  return { plan, rows: Object.entries(amounts).filter(([id, q]) => I[id]?.selectable && q > EPS).map(([id, q]) => ({ id, q })) };
+}
+function renderSupplyTransferSources(preferred) {
+  supplyTransferSources = workshop.plans.filter(p => p.id !== workshop.active.id).map(p => ({ key: 'plan:' + p.id, name: p.name, state: p.state }));
+  if (workshop.existing) supplyTransferSources.push({ key: 'baseline', name: workshop.existing.name + ' · 基准', state: workshop.existing.state });
+  supplyTransferSources.push(...importedSupplySources);
+  const select = $('supplyTransferSource');
+  select.innerHTML = supplyTransferSources.length ? supplyTransferSources.map(p => `<option value="${esc(p.key)}">${esc(p.name)}</option>`).join('') : '<option value="">没有其他已保存方案，可读取 JSON</option>';
+  if (supplyTransferSources.some(p => p.key === preferred)) select.value = preferred;
+  renderSupplyTransferRows();
+}
+function renderSupplyTransferRows() {
+  const source = supplyTransferSources.find(p => p.key === $('supplyTransferSource').value);
+  supplyTransferRows = [];
+  $('applySupplyTransfer').disabled = true;
+  if (!source) { $('supplyTransferRows').innerHTML = '<p>请先保存另一份方案，或读取导出的 JSON 配置。</p>'; return; }
+  const evaluated = supplySourceProducts(source.state);
+  if (!evaluated.plan) { $('supplyTransferRows').innerHTML = '<p class="over">源方案不可行，无法确认可外供产量。请先修正源方案。</p>'; return; }
+  supplyTransferRows = evaluated.rows;
+  $('supplyTransferRows').innerHTML = `<div class="tablewrap"><table><thead><tr><th>选择</th><th>产物 / 单位</th><th>源方案可外供 / 分</th><th>当前外供 / 分</th><th>本次接入 / 分</th><th>导入后外供 / 分</th></tr></thead><tbody>${supplyTransferRows.map(row => {
+    const conflict = hasProductMaterial(row.id), old = state.supplies.find(x => x.id === row.id)?.q || 0;
+    return `<tr><td><input type="checkbox" data-transfer-check="${esc(row.id)}" ${conflict ? 'disabled' : 'checked'}></td><td>${esc(I[row.id].name)} <small>${unit(row.id)}</small>${conflict ? '<div class="over small">与当前最终产物冲突</div>' : ''}</td><td>${fmt(row.q)}</td><td>${fmt(old)}</td><td><input data-transfer-quantity="${esc(row.id)}" type="number" min="0" max="${row.q}" step="any" value="${displayNumber(cleanComputedQuantity(row.q))}" ${conflict ? 'disabled' : ''} style="width:120px"></td><td data-transfer-preview="${esc(row.id)}">—</td></tr>`;
+  }).join('')}</tbody></table></div>${supplyTransferRows.length ? '' : '<p>源方案没有可接入的最终产物或净余电。</p>'}`;
+  updateSupplyTransferPreview();
+}
+function updateSupplyTransferPreview() {
+  const add = $('supplyTransferMode').value === 'add';
+  let selected = false;
+  for (const row of supplyTransferRows) {
+    const check = document.querySelector(`[data-transfer-check="${row.id}"]`), input = document.querySelector(`[data-transfer-quantity="${row.id}"]`), preview = document.querySelector(`[data-transfer-preview="${row.id}"]`);
+    if (!check || !input || !preview) continue;
+    const q = Math.max(0, Math.min(row.q, Number(input.value) || 0)), old = state.supplies.find(x => x.id === row.id)?.q || 0;
+    const chosen = check.checked && !check.disabled;
+    preview.textContent = fmt(chosen ? (add ? old : 0) + q : old);
+    selected ||= chosen && q > EPS;
+  }
+  $('applySupplyTransfer').disabled = !selected;
+}
+function openSupplyTransfer(key) {
+  $('supplyTransferMode').value = 'replace';
+  $('supplyTransferMessage').textContent = '';
+  renderSupplyTransferSources(key);
+  $('supplyTransferDialog').showModal();
+}
+function applySupplyTransfer() {
+  const source = supplyTransferSources.find(p => p.key === $('supplyTransferSource').value);
+  if (!source) return;
+  const additions = [];
+  for (const row of supplyTransferRows) {
+    const check = document.querySelector(`[data-transfer-check="${row.id}"]`);
+    if (!check?.checked || check.disabled || hasProductMaterial(row.id)) continue;
+    const input = document.querySelector(`[data-transfer-quantity="${row.id}"]`), value = Number(input?.value);
+    if (!input?.value.trim() || !Number.isFinite(value) || value < 0 || value > row.q + EPS) {
+      $('supplyTransferMessage').textContent = '接入量需在 0 与源方案可外供量之间。';
+      return;
+    }
+    if (value > EPS) additions.push({ id: row.id, q: cleanComputedQuantity(value) });
+  }
+  if (!additions.length) return;
+  const add = $('supplyTransferMode').value === 'add';
+  for (const row of additions) {
+    let supply = state.supplies.find(x => x.id === row.id);
+    if (!supply) { supply = { id: row.id, q: 0, stop: true }; state.supplies.push(supply); }
+    supply.q = cleanComputedQuantity((add ? supply.q : 0) + row.q);
+    supply.stop = true;
+  }
+  $('supplyTransferDialog').close();
+  fitSupplies();
+  renderAll();
+  setStatus('已从 ' + source.name + ' 接入 ' + additions.length + ' 项供给；源方案保持不变。');
+}
+function initSupplyTransfer() {
+  const button = document.createElement('button');
+  button.id = 'openSupplyTransfer'; button.className = 'wide side-actions'; button.textContent = '从其他方案导入供给';
+  $('supplies').before(button);
+  const dialog = document.createElement('dialog'); dialog.id = 'supplyTransferDialog'; dialog.className = 'wide-dialog';
+  dialog.innerHTML = `<div class="top"><h2>产物接入当前供给</h2><button id="closeSupplyTransfer">关闭</button></div><div class="formgrid"><label>源方案<select id="supplyTransferSource"></select></label><label>已有供给处理<select id="supplyTransferMode"><option value="replace">替换同物品供给，避免重复计入</option><option value="add">叠加到现有供给</option></select></label></div><div class="buttons" style="margin:12px 0"><button id="readSupplyTransferFile">读取其他方案 JSON</button><input id="supplyTransferFile" type="file" accept=".json" hidden></div><div id="supplyTransferRows"></div><p id="supplyTransferMessage" class="over" role="status"></p><button id="applySupplyTransfer" class="primary">接入当前供给</button>`;
+  document.body.append(dialog);
+  button.onclick = () => openSupplyTransfer();
+  $('closeSupplyTransfer').onclick = () => dialog.close();
+  $('supplyTransferSource').onchange = renderSupplyTransferRows;
+  $('supplyTransferMode').onchange = updateSupplyTransferPreview;
+  dialog.addEventListener('input', event => { if (event.target.matches('[data-transfer-quantity],[data-transfer-check]')) updateSupplyTransferPreview(); });
+  dialog.addEventListener('change', event => { if (event.target.matches('[data-transfer-check]')) updateSupplyTransferPreview(); });
+  $('applySupplyTransfer').onclick = applySupplyTransfer;
+  $('readSupplyTransferFile').onclick = () => $('supplyTransferFile').click();
+  $('supplyTransferFile').onchange = async event => {
+    const file = event.target.files[0]; if (!file) return;
+    try {
+      const json = JSON.parse(await file.text());
+      const incoming = PlanFiles.read(json, file.name.replace(/\.json$/i, ''), validSnapshot);
+      const start = importedSupplySources.length;
+      importedSupplySources.push(...incoming.map((x, i) => ({ key: 'file:' + (start + i), name: file.name + ' · ' + x.name, state: x.state })));
+      renderSupplyTransferSources('file:' + start);
+      $('supplyTransferMessage').textContent = '';
+    } catch (error) { $('supplyTransferMessage').textContent = '无法读取该方案：' + error.message; }
+    event.target.value = '';
+  };
+  document.addEventListener('click', event => {
+    const id = event.target.closest('[data-export-supply]')?.dataset.exportSupply;
+    if (id) openSupplyTransfer('plan:' + id);
+  });
+}
+initSupplyTransfer();
+let machineGroupsRecipe = '', machineGroupsDraft = null;
+function renderMachineGroupProfiles() {
+  const el = $('machineGroupProfiles'); if (!el) return;
+  const profiles = Object.entries(state.machineGroups || {});
+  const budget = MAP_DATA.nodes.filter(n => n.kind === 'somersloop').length;
+  const installed = state.machineGroupsEnabled ? profiles.reduce((sum, [,p]) => sum + p.groups.reduce((n,g) => n + g.count * g.sloops, 0), 0) : 0;
+  const total = current?.sloopTotal ?? installed;
+  el.innerHTML = profiles.length ? profiles.map(([key, profile]) => `<div class="stage"><b>${esc(R[key].name)}</b> · ${profile.groups.length} 组 · ${profile.groups.reduce((sum,g) => sum + g.count,0)} 台 <button data-machine-groups="${esc(key)}" ${state.machineGroupsEnabled ? '' : 'disabled'}>编辑分组</button></div>`).join('') : '';
+  if (profiles.length) el.innerHTML += `<p class="${budget && total > budget ? 'over' : 'small'}">晶体统计：${fmt(total)} / 地图 ${fmt(budget)}${!current ? '（产线不可行，仅计已配置分组）' : ''}${budget && total > budget ? ' · 超出地图数量，请调整配置；不会自动删改分组。' : ''}</p>`;
+}
+function machineGroupsPreview() {
+  if (!machineGroupsRecipe || !machineGroupsDraft) return;
+  const profile = normalizeMachineGroups({ [machineGroupsRecipe]: machineGroupsDraft })[machineGroupsRecipe];
+  if (!profile) { $('machineGroupsSummary').textContent = '请添加至少一组机器。'; return; }
+  const s = { ...state, machineGroupsEnabled: true, machineGroups: { ...state.machineGroups, [machineGroupsRecipe]: profile } };
+  let machines = 0, crystals = 0, power = 0;
+  const output = {};
+  for (const key of groupedRecipes(machineGroupsRecipe, s)) {
+    const g = machineGroup(key, s), eq = g.count * machineClock(key, s) / 100, rr = rates(key, s);
+    machines += g.count; crystals += g.count * g.sloops; power += configure(key, eq, s).power;
+    for (const [id, q] of Object.entries(rr.outs)) output[id] = (output[id] || 0) + q * eq;
+  }
+  $('machineGroupsSummary').innerHTML = `<b>配置 ${fmt(machines)} 台 · 晶体 ${fmt(crystals)} 枚 · 满负荷耗电 ${fmt(power)} MW</b><p>${Object.entries(output).map(([id,q]) => esc(I[id].name) + ' ' + fmt(q) + ' ' + unit(id)).join('；')}</p>`;
+}
+function renderMachineGroupsEditor() {
+  const r = R[machineGroupsRecipe], slots = B[r.b]?.sloopSlots || 0;
+  $('machineGroupsMode').value = machineGroupsDraft.mode;
+  $('machineGroupsRows').innerHTML = machineGroupsDraft.groups.map(g => `<tr><td>组 ${g.id}</td><td><input data-machine-group-field="count" data-machine-group-id="${g.id}" type="number" min="0" max="1000000" step="1" value="${displayNumber(g.count)}" aria-label="组 ${g.id} 台数" style="width:85px"></td><td><input data-machine-group-field="clock" data-machine-group-id="${g.id}" type="number" min="1" max="250" step="any" value="${displayNumber(g.clock)}" aria-label="组 ${g.id} 频率" style="width:85px"></td><td><input data-machine-group-field="sloops" data-machine-group-id="${g.id}" type="number" min="0" max="${slots}" step="1" value="${displayNumber(g.sloops)}" aria-label="组 ${g.id} 每台晶体" ${slots ? '' : 'disabled'} style="width:85px"> / ${slots}</td><td><button data-remove-machine-group="${g.id}">删除</button></td></tr>`).join('');
+  $('disableMachineGroups').disabled = !state.machineGroups?.[machineGroupsRecipe];
+  machineGroupsPreview();
+}
+function openMachineGroups(key) {
+  if (!state.machineGroupsEnabled) { setStatus("请先在设置中启用机器分组配置。"); return; }
+  const parent = recipeBase(key), r = R[parent];
+  if (!r || r.kind !== 'machine') return;
+  machineGroupsRecipe = parent;
+  const rows = current?.rows.filter(row => recipeBase(row.k) === parent) || [];
+  machineGroupsDraft = state.machineGroups?.[parent] ? copy(state.machineGroups[parent]) : { mode: 'capacity', groups: [{ id: 1, count: Math.max(1, rows.reduce((n,row) => n + row.n,0)), clock: machineClock(parent), sloops: amplification(parent).count }] };
+  $('machineGroupsTitle').textContent = R[parent].name + ' · 机器分组配置';
+  $('machineGroupsBuilding').textContent = B[r.b]?.name || r.b;
+  $('machineGroupsMessage').textContent = '';
+  renderMachineGroupsEditor();
+  $('machineGroupsDialog').showModal();
+}
+function applyMachineGroups() {
+  const parent = machineGroupsRecipe, slots = B[R[parent].b]?.sloopSlots || 0;
+  if (!machineGroupsDraft.groups.length) { $('machineGroupsMessage').textContent = '至少保留一组；如需停用，请恢复统一配置。'; return; }
+  for (const g of machineGroupsDraft.groups) {
+    const count = Number(g.count), clock = Number(g.clock), sloops = Number(g.sloops);
+    if (String(g.count).trim() === '' || String(g.clock).trim() === '' || String(g.sloops).trim() === '' || !Number.isInteger(count) || count < 0 || count > 1000000 || !Number.isFinite(clock) || clock < 1 || clock > 250 || !Number.isInteger(sloops) || sloops < 0 || sloops > slots) {
+      $('machineGroupsMessage').textContent = '台数须为非负整数，频率为 1–250%，晶体数须为槽位范围内的整数。'; return;
+    }
+  }
+  const profile = normalizeMachineGroups({ [parent]: machineGroupsDraft })[parent];
+  const previous = state.machineGroups?.[parent];
+  state.machineGroups ??= {};
+  state.machineGroups[parent] = profile;
+  const keys = groupedRecipes(parent);
+  if (!previous) {
+    let built = Math.floor(amount(state.built?.['recipe:' + parent]));
+    for (const key of keys) { const count = machineGroup(key).count; state.built['recipe:' + key] = Math.min(built, count); built = Math.max(0, built - count); }
+  }
+  $('machineGroupsDialog').close();
+  renderAll();
+  setStatus('分组配置已保存，各组独立计算产量、原料和耗电。若供给不足，保留配置并显示不可行提示。');
+}
+function initMachineGroups() {
+  const dialog = document.createElement('dialog'); dialog.id = 'machineGroupsDialog'; dialog.className = 'wide-dialog';
+  dialog.innerHTML = `<div class="top"><h2 id="machineGroupsTitle">机器分组配置</h2><button id="closeMachineGroups">关闭</button></div><p id="machineGroupsBuilding"></p><label>运行方式<select id="machineGroupsMode"><option value="capacity">按需求运行：台数作为上限</option><option value="fixed">固定全开：严格按各组配置运行</option></select></label><div class="tablewrap" style="margin:14px 0"><table><thead><tr><th>分组</th><th>台数</th><th>频率 %</th><th>每台晶体数</th><th>操作</th></tr></thead><tbody id="machineGroupsRows"></tbody></table></div><button id="addMachineGroup">＋ 添加一组</button><div id="machineGroupsSummary" class="stage"></div><details class="stage"><summary>分组计算规则</summary><p>各组分别计算：输入随运行台数和频率线性变化；产出再乘以该组晶体倍率；耗电按该组频率指数与晶体倍率平方计算，然后逐组求和。</p><p>按需求运行允许停机和末台降频，台数是各组容量上限；安装的机器和晶体仍按完整配置统计。固定全开会将当前启用配方的全部分组按设定运行，可能产生余量，供给不足时不会悄悄改变分组。</p><p>同配方分组共享产物和原料池，可共同供应最终产物及其他上游需求。分组设置优先于统一晶体数和本类频率；关闭超频时实际频率不超过 100%，原值保留。发电机的晶体槽位为 0。</p></details><p id="machineGroupsMessage" class="over" role="status"></p><div class="buttons"><button id="applyMachineGroups" class="primary">应用分组配置</button><button id="disableMachineGroups">恢复统一配置</button></div>`;
+  document.body.append(dialog);
+  const setting = document.createElement('div'); setting.className = 'panel';
+  setting.innerHTML = '<h2>机器分组</h2><label class="buildcheck"><input id="enableMachineGroups" type="checkbox"> 启用机器分组配置</label><div id="machineGroupProfiles"></div>';
+  $('settingsTab').append(setting);
+  $('enableMachineGroups').checked = !!state.machineGroupsEnabled;
+  renderMachineGroupProfiles();
+  $('enableMachineGroups').onchange = event => { state.machineGroupsEnabled = event.target.checked; renderAll(); };
+  $('closeMachineGroups').onclick = () => dialog.close();
+  $('addMachineGroup').onclick = () => {
+    if (machineGroupsDraft.groups.length >= 100) { $('machineGroupsMessage').textContent = '每个配方最多支持 100 组。'; return; }
+    const id = Math.max(0, ...machineGroupsDraft.groups.map(g => g.id)) + 1;
+    machineGroupsDraft.groups.push({ id, count: 1, clock: 100, sloops: 0 }); renderMachineGroupsEditor();
+  };
+  $('machineGroupsMode').onchange = event => { machineGroupsDraft.mode = event.target.value; machineGroupsPreview(); };
+  dialog.addEventListener('input', event => {
+    const field = event.target.dataset.machineGroupField, id = +event.target.dataset.machineGroupId;
+    if (!field) return;
+    const group = machineGroupsDraft.groups.find(g => g.id === id); if (!group) return;
+    group[field] = event.target.value; machineGroupsPreview();
+  });
+  dialog.addEventListener('click', event => {
+    const id = event.target.closest('[data-remove-machine-group]')?.dataset.removeMachineGroup;
+    if (id) { machineGroupsDraft.groups = machineGroupsDraft.groups.filter(g => g.id !== +id); renderMachineGroupsEditor(); }
+  });
+  $('applyMachineGroups').onclick = applyMachineGroups;
+  $('disableMachineGroups').onclick = () => {
+    const parent = machineGroupsRecipe;
+    const keys = groupedRecipes(parent), count = keys.reduce((sum,key) => sum + Math.min(machineGroup(key)?.count || 0, amount(state.built?.['recipe:' + key])), 0);
+    state.built['recipe:' + parent] = count;
+    delete state.machineGroups[parent];
+    dialog.close(); renderAll(); setStatus('已恢复统一晶体和频率配置。');
+  };
+  document.addEventListener('click', event => {
+    const key = event.target.closest('[data-machine-groups]')?.dataset.machineGroups;
+    if (key) openMachineGroups(key);
+  });
+}
+initMachineGroups();

@@ -104,3 +104,34 @@ Report bugs and suggestions through [Issues](https://github.com/seanz298/satisfa
 This project is not an official Coffee Stain Studios product. The Satisfactory name, game icons, maps, and related assets belong to their respective rights holders.
 
 This repository package does not yet specify a blanket open-source license. Public visibility does not imply identical redistribution rights for all content. Licensing for the code and game assets should be considered separately.
+
+## Sink-point optimization and unlocked alternate recipes
+
+Open **Settings → Unlocked alternate recipes** to search and select the recipes you own. Select all/clear are supported; initial selection is empty. Default recipes remain available. Selections constrain the optimizer, not manually configured production. Preferences persist with each plan and survive import/export, plan switching and undo/redo.
+
+In the general settings page, choose normal or all-pure map resources, production clock, available Somersloops, reserved power, time limit and an Alien Power Augmenter policy. Optionally cap raw extraction using the current plan's raw supplies; unspecified resources still use map ceilings. Intermediate supplies are not treated as free resources. Preview the result and save it as one new editable machine-group plan.
+
+Optimization uses the embedded, pinned HiGHS-JS WebAssembly solver inside a cancellable Web Worker. No server, Python installation or network access is required at runtime. Time-limited feasible results are distinguished from proven optima of the configured model. This is a fixed-clock MILP model with integer machine rounding and tail underclocking, not a globally optimal continuous-clock nonlinear model.
+
+The model includes integer Somersloop allocation, extraction power, water recycling, alternate recipes, conversion, closed nuclear-waste processing and integer sink counts at 30 MW each. Augmenters use 10 Somersloops each; fueled units consume 5 Alien Power Matrices/min each. Sub-1% tail loads use capacity groups and the calculator's existing intermittent-duty logic.
+
+Power uses averages. Reserve power for transport, extra pipeline pumps and load fluctuations. Optimization assumes standard 1× world input/power rules; the generated generation multiplier represents augmenter effects. Extraction and sink demand are recorded as extra load; geothermal and augmenter base power are recorded as explicit electricity supply. Do not add them twice. Optimization summaries are historical and need rerunning after manual changes.
+
+Sources/licenses: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). New source modules: `src/optimizer-core.js`, `src/optimizer-ui.js`, `data/optimization.json`, `vendor/highs/`.
+
+Checks (Node.js 18+, no npm install): `node tests/optimizer.cjs`, `node tests/integration.cjs`, `node tests/scenarios.cjs`.
+
+## Plan files and importing
+
+- Export one plan at a time as `Plan name.json`; whole-workspace export is no longer available.
+- The header exports the current draft. Each saved-plan row exports that saved snapshot.
+- Import accepts multiple JSON files and appends their plans without replacing the active draft, existing plans or baseline. Name collisions receive a numbered suffix.
+- Legacy workspace and version-12 state files are supported. Identical active/saved snapshots are deduplicated within a legacy file; differing unsaved drafts are preserved.
+- An invalid file rejects the entire import batch before changes are committed.
+- New format: `satisfactory-plan`, `configVersion: 1`, with name, kind, gameVersion, savedAt and state. The state version remains 12. Workspace persistence remains internal to the browser.
+
+Static explanatory footnotes have been removed; units, controls, calculation status and errors remain. Existing calculation rules are unchanged.
+
+`src/plan-files.js` owns file handling. Old preview builds and generated/failed test snapshots were removed. Tests now create inputs in memory. Runtime data, licenses and model reference source remain.
+
+Run `node tests/plan-files.cjs`, `node tests/integration.cjs`, and `node tests/scenarios.cjs`. Build with `python3 scripts/build.py`; package clean sources with `python3 scripts/package.py` (output: `dist/`). Browser testing was unavailable in this environment.
