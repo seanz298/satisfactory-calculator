@@ -526,10 +526,13 @@ function planSolve(
         externals.add(id);
   for (const id of externals) {
     if (hasProductMaterial(id, s) && !(I[id]?.raw && s.supplies.some(p => p.id === id))) continue;
-    const v = { objective: target || flex ? 0 : 1, [id]: 1 };
-    if (mode === "forward" || (cap && id === cap.id)) {
+    // A non-boundary supply is a finite contribution: use it first, then
+    // manufacture any remaining demand, including in reverse planning.
+    const partial = s.supplies.some(x => x.id === id && !x.stop);
+    const v = { objective: target || flex || partial ? 0 : 1, [id]: 1 };
+    if (mode === "forward" || (cap && id === cap.id) || (partial && mode !== "shortage")) {
       model.constraints["s:" + id] = {
-        max: cap ? amount(cap.q) : pool[id] || 0,
+        max: cap && id === cap.id ? amount(cap.q) : pool[id] || 0,
       };
       v["s:" + id] = 1;
     }
