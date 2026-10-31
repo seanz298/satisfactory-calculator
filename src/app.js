@@ -6173,6 +6173,41 @@ function machineLabel(row) {
     );
   return a.join(" ＋ ") || "0台";
 }
+function diagnosePlanFailure(s = state, solution = {}) {
+  if (solution.constraintConflict)
+    return { reason: "单输入约束物料不能同时作为最终产物，请更换约束物料。", missing: [], checks: [] };
+  if (solution.unbounded)
+    return { reason: "计算模型无界，请检查循环配方和机器设置。", missing: [], checks: [] };
+  const targets = demands(s), checks = [];
+  const relaxed = planSolve(targets, s, { mode: "shortage" });
+  const missing = relaxed.ok ? Object.entries(relaxed.result)
+    .filter(([key, q]) => key.startsWith("short:") && q > 1e-5)
+    .map(([key, q]) => ({ id: key.slice(6), q })) : [];
+  if (s.mode === "constrained" && s.inputConstraint) {
+    const cap = s.inputConstraint;
+    const trial = q => planSolve(targets, { ...s, inputConstraint: { ...cap, q } }, { mode: "constrained" }).ok;
+    if (trial(1e8)) {
+      let lo = cap.q, hi = 1e8;
+      for (let i = 0; i < 32; i++) {
+        const mid = (lo + hi) / 2;
+        if (trial(mid)) hi = mid; else lo = mid;
+      }
+      checks.push("单输入约束不足：" + (I[cap.id]?.name || cap.id) + " 当前上限 " + fmt(cap.q) + "，至少约需 " + fmt(hi) + " " + unit(cap.id) + "。");
+    }
+  }
+  if (s.strict && planSolve(targets, { ...s, strict: false }, { mode: s.mode }).ok)
+    checks.push("关闭流体严格平衡后可行：请检查无法消纳的流体副产物。");
+  if (s.machineGroupsEnabled && planSolve(targets, { ...s, machineGroupsEnabled: false }, { mode: s.mode }).ok) {
+    const names = Object.keys(s.machineGroups || {}).map(k => R[k]?.name || k);
+    checks.push("关闭机器分组限制后可行：请检查 " + names.join("、") + " 的台数、频率或固定全开设置。");
+  }
+  return {
+    reason: missing.length ? "当前目标不可行。放宽供给限制后的缺口参考：" :
+      checks.length ? "当前目标不可行，检查结果如下：" :
+      "当前目标不可行，暂未能定位唯一原因。请检查供给起点、手工物品、配方循环及机器分组。",
+    missing, checks,
+  };
+}
 function renderResults() {
   const solution = planSolve(demands(), state, { mode: state.mode });
   current = summarize(solution);
@@ -6198,12 +6233,10 @@ function renderResults() {
     )
     .join("");
   if (!p) {
-    $("balance").innerHTML =
-      '<p class="over">' +
-      (solution.constraintConflict
-        ? "单输入约束物料不能同时作为最终产物，请更换约束物料。"
-        : "当前目标不可行。供给、锁定项、手工物品或流体副产物约束可能冲突。") +
-      "</p>";
+    const detail = diagnosePlanFailure(state, solution);
+    $("balance").innerHTML = `<p class="over">${esc(detail.reason)}</p>` +
+      (detail.missing.length ? `<div class="tablewrap"><table><thead><tr><th>缺少物料</th><th>需增加 / 分</th></tr></thead><tbody>${detail.missing.map(x => `<tr><td>${esc(I[x.id]?.name || x.id)}</td><td>${fmt(x.q)} ${unit(x.id)}</td></tr>`).join("")}</tbody></table></div>` : "") +
+      detail.checks.map(text => `<p class="over">${esc(text)}</p>`).join("");
     $("machines").innerHTML = "";
     $("surplus").innerHTML = "";
     $("processBalance").innerHTML = $("balance").innerHTML;
