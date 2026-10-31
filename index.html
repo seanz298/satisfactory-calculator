@@ -3769,7 +3769,9 @@ function reverseSupplyBudget(plan, s = state) {
   const nodePool = {};
   for (const n of s.nodes)
     nodePool[n.item] = (nodePool[n.item] || 0) + nodeOutput(n).output;
-  return Object.entries(plan.external)
+  const locked = s.supplies.filter(x => x.lock).map(x => ({...x}));
+  return locked.concat(Object.entries(plan.external)
+    .filter(([id]) => !locked.some(x => x.id === id))
     .filter(
       ([id, q]) => q > (nodePool[id] || 0) + EPS && !hasProductMaterial(id, s),
     )
@@ -3777,7 +3779,7 @@ function reverseSupplyBudget(plan, s = state) {
       id,
       q: cleanComputedQuantity(Math.max(0, q - (nodePool[id] || 0))),
       stop: true,
-    }));
+    })));
 }
 function defaultPowerRecipe(s = state) {
   const priority = [
@@ -5077,6 +5079,7 @@ function initEnhancements() {
       );
       if (q <= EPS || hasProductMaterial(x.id) || I[x.id].handOnly) continue;
       let sup = state.supplies.find((s) => s.id === x.id);
+      if (sup?.lock) continue;
       if (!sup) {
         sup = { id: x.id, q: 0, stop: true };
         state.supplies.push(sup);
@@ -9203,6 +9206,7 @@ function convertMachineOutputToSupply(id, k) {
     removed = hasProductMaterial(id);
   state.products = state.products.filter((p) => materialId(p.id) !== id);
   let entry = state.supplies.find((p) => p.id === id);
+  if (entry?.lock) { state.products = before.products; setStatus("请先解除该供给的数量锁定。", true); return; }
   const old = entry?.q || 0;
   if (!entry) {
     entry = { id, q: 0, stop: true };
@@ -9531,7 +9535,7 @@ function safeState(x) {
         !supplySeen.has(p.id) &&
         supplySeen.add(p.id),
     )
-    .map((p) => ({ id: p.id, q: amount(p.q), stop: p.stop !== false }));
+    .map((p) => ({ id: p.id, q: amount(p.q), stop: p.stop !== false, lock: !!p.lock }));
   s.selected = Object.fromEntries(
     Object.entries(x.selected || {}).filter(
       ([id, k]) =>
@@ -9728,7 +9732,7 @@ function controls() {
   for (const k of ["over", "strict", "event", "autoPin"])
     $(k).checked = state[k];
   for (const k of ["mode", "sort", "clockNum", "powerMult"])
-    $(k).value = displayNumber(state[k === "clockNum" ? "clock" : k]);
+    $(k).value = ["mode", "sort"].includes(k) ? state[k] : displayNumber(state[k === "clockNum" ? "clock" : k]);
   $("clock").max = $("clockNum").max = state.over ? 250 : 100;
   $("clock").value = state.clock;
   $("applyReverse").hidden = state.mode === "forward";
@@ -9739,7 +9743,7 @@ function renderSupplies() {
     state.supplies
       .map(
         (x) =>
-          `<div class="card"><div class="top"><div class="itemhead">${icon(x.id)}<div><b>${esc(I[x.id].name)}</b><small style="display:block">${esc(I[x.id].en)}</small></div></div><button data-delsupply="${x.id}" aria-label="移除${esc(I[x.id].name)}">×</button></div><label class="rowfield">${unit(x.id)}<input data-supply="${x.id}" type="number" min="0" max="100000000" step="any" value="${displayNumber(cleanComputedQuantity(x.q))}"></label><label class="small"><input data-stop="${x.id}" type="checkbox" ${x.stop ? "checked" : ""}> 作为产线起点，不再制造此物品</label></div>`,
+          `<div class="card"><div class="top"><div class="itemhead">${icon(x.id)}<div><b>${esc(I[x.id].name)}</b><small style="display:block">${esc(I[x.id].en)}</small></div></div><button data-delsupply="${x.id}" aria-label="移除${esc(I[x.id].name)}">×</button></div><label class="rowfield">${unit(x.id)}<input data-supply="${x.id}" type="number" min="0" max="100000000" step="any" value="${displayNumber(cleanComputedQuantity(x.q))}" ${x.lock ? "disabled" : ""}></label><label><input data-supplylock="${x.id}" type="checkbox" ${x.lock ? "checked" : ""}> 锁定供给数量</label><label class="small"><input data-stop="${x.id}" type="checkbox" ${x.stop ? "checked" : ""}> 作为产线起点，不再制造此物品</label></div>`,
       )
       .join("") || '<div class="empty">尚未添加外部供给</div>';
 }
@@ -10417,6 +10421,10 @@ function init() {
     if (d.supply) {
       state.supplies.find((x) => x.id === d.supply).q = amount(value);
       fitSupplies();
+      renderAll();
+    }
+    if (d.supplylock) {
+      state.supplies.find((x) => x.id === d.supplylock).lock = e.target.checked;
       renderAll();
     }
     if (d.stop) {
@@ -11401,6 +11409,10 @@ function applySupplyTransfer() {
   for (const row of supplyTransferRows) {
     const check = document.querySelector(`[data-transfer-check="${row.id}"]`);
     if (!check?.checked || check.disabled || hasProductMaterial(row.id)) continue;
+    if (state.supplies.find(x => x.id === row.id)?.lock) {
+      $("supplyTransferMessage").textContent = "请先解除该供给的数量锁定。";
+      return;
+    }
     const input = document.querySelector(`[data-transfer-quantity="${row.id}"]`), value = Number(input?.value);
     if (!input?.value.trim() || !Number.isFinite(value) || value < 0 || value > row.q + EPS) {
       $('supplyTransferMessage').textContent = '接入量需在 0 与源方案可外供量之间。';
