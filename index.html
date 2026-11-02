@@ -2780,6 +2780,13 @@ html[lang="en"] .board-caption {
               >橙：成品 · 青：外供 · 绿：工序 · 红：余量</span
             >
           </div>
+          <details id="livePlanPanel" open>
+            <summary>跨方案实时连接</summary>
+            <p id="livePlanStatus"></p>
+            <div class="formgrid"><label>来源方案<select id="liveFrom"></select></label><label>接收方案<select id="liveTo"></select></label><label>物料<select id="liveItem"></select></label><label>申请 / 分<input id="liveRate" type="number" min="0" max="100000000" step="any" value="0"></label></div>
+            <button id="liveAdd">建立实时连接</button><p id="livePlanMessage" role="status"></p>
+            <div id="livePlanErrors"></div><div id="livePlanCanvas" style="overflow:auto;max-height:650px;touch-action:pan-x pan-y"></div><div id="livePlanRows"></div>
+          </details>
           <div id="graphPreviewLabel" class="notice" hidden></div>
           <details id="routingPanel">
             <summary>手动连接物料</summary>
@@ -3544,10 +3551,23 @@ const PlanFiles = (() => {
     if (value?.format) throw Error('不支持此配置格式');
     return [entry({name:fallback, state:value})];
   }
-  function merge(workspace, incoming) {
+  function merge(workspace, incoming, activeUid = null) {
     const next = clone(workspace), names = new Set(next.plans.map(p => p.name));
     names.add(next.active.name);
     let id = Math.max(1, next.nextId || 1, ...next.plans.map(p => p.id + 1), (next.active.id || 0) + 1);
+    incoming = clone(incoming);
+    const usedUids = new Set(next.plans.map(p => p.state?.planUid).filter(Boolean));
+    if(next.active?.id == null && next.active?.state?.planUid) usedUids.add(next.active.state.planUid);
+    if(activeUid) usedUids.add(activeUid);
+    const remap = new Map();
+    for (const p of incoming) {
+      const uid = p.state?.planUid;
+      if (!uid) continue;
+      if(usedUids.has(uid)) p.state.planUid='plan-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2,12);
+      usedUids.add(p.state.planUid);
+      if(!remap.has(uid)) remap.set(uid,p.state.planUid);
+    }
+    for (const p of incoming) for(const link of p.state?.liveLinks || []) if(remap.has(link.from)) link.from=remap.get(link.from);
     for (const plan of incoming) {
       const base = title(plan.name); let name = base, suffix = 2;
       while (names.has(name)) name = base.slice(0, 85) + '（导入 ' + suffix++ + '）';
@@ -3560,6 +3580,52 @@ const PlanFiles = (() => {
   return {filename, payload, read, merge};
 })();
 if (typeof module === 'object' && module.exports) module.exports = PlanFiles;
+
+/* Cross-plan network evaluator. No browser globals or mutations. */
+const PlanNetwork = (() => {
+  const clone = x => JSON.parse(JSON.stringify(x));
+  function normalize(value) {
+    if (!value || value.version !== 1 || !Array.isArray(value.links)) return {version:1,links:[]};
+    const ids = new Set();
+    return {version:1,links:value.links.map(l => {
+      if (!l || typeof l.id !== 'string' || ids.has(l.id) || typeof l.from !== 'string' || typeof l.to !== 'string' || typeof l.item !== 'string' || !Number.isFinite(l.rate) || l.rate < 0) throw Error('跨方案连接数据无效');
+      ids.add(l.id); return {id:l.id,from:l.from,to:l.to,item:l.item,rate:l.rate};
+    })};
+  }
+  function evaluate(plans, network, calculate) {
+    const links=normalize(network).links, by=new Map();
+    for(const p of plans) { if(by.has(p.id)) throw Error('方案标识重复'); by.set(p.id,p); }
+    const results=new Map(), visiting=new Set(), errors=[], allocations=new Map();
+    function visit(id) {
+      if(results.has(id)) return results.get(id);
+      if(visiting.has(id)) throw Error('循环依赖：'+[...visiting,id].join(' → '));
+      const plan=by.get(id); if(!plan) throw Error('来源方案不存在：'+id);
+      visiting.add(id);
+      const incoming={};
+      for(const l of links.filter(x=>x.to===id)) {
+        const source=visit(l.from);
+        if(!source.ok) throw Error('来源方案不可行：'+l.from);
+        const total=links.filter(x=>x.from===l.from&&x.item===l.item).reduce((n,x)=>n+x.rate,0);
+        const capacity=Math.max(0,Number(source.exports[l.item])||0);
+        const q=total>0?l.rate*Math.min(1,capacity/total):0;
+        allocations.set(l.id,{requested:l.rate,actual:q,shortage:Math.max(0,l.rate-q)});
+        incoming[l.item]=(incoming[l.item]||0)+q;
+      }
+      const result=calculate(clone(plan.state),clone(incoming));
+      if(!result||typeof result.ok!=='boolean') throw Error('方案计算结果无效：'+id);
+      const out={...result,exports:result.ok?{...result.exports}:{},incoming};
+      results.set(id,out); visiting.delete(id); return out;
+    }
+    // Validate all endpoints, including links whose destination was removed.
+    for(const l of links) if(!by.has(l.from)||!by.has(l.to)) errors.push({link:l.id,message:'连接引用了不存在的方案'});
+    for(const id of by.keys()) {
+      try { visit(id); } catch(e) { errors.push({plan:id,message:e.message}); visiting.clear(); }
+    }
+    return {ok:errors.length===0&&[...results.values()].every(x=>x.ok),results,allocations,errors};
+  }
+  return {normalize,evaluate};
+})();
+if(typeof module==='object'&&module.exports) module.exports=PlanNetwork;
 
 /* Local MILP optimizer. HiGHS/HiGHS-JS and reference model: MIT, see vendor notices. */
 const FactoryOptimizer = (() => {
@@ -3726,9 +3792,45 @@ const DEFAULTS = Object.fromEntries(
     return [k, I[k].raw ? "" : options[0] || ""];
   }),
 );
+function makePlanUid() {
+  return 'plan-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2,12);
+}
+function livePlanRecords(override = state) {
+  const records = (typeof workshop === 'object' ? workshop.plans : []).map(p => ({id:p.state.planUid,name:p.name,state:workshop.liveDrafts?.[p.state.planUid] || p.state}));
+  const index = records.findIndex(p => p.id === override.planUid);
+  const active = {id:override.planUid,name:typeof workshop === 'object' ? workshop.active.name : '当前方案',state:override};
+  if (index >= 0) records[index] = active; else records.push(active);
+  return records;
+}
+function evaluateLivePlans(override = state) {
+  const plans=livePlanRecords(override);
+  const signature=JSON.stringify(plans);
+  if(globalThis.__livePlanCache?.signature === signature) return globalThis.__livePlanCache.value;
+  const network={version:1,links:plans.flatMap(p=>(p.state.liveLinks||[]).map(l=>({...l,to:p.id,id:p.id+':'+l.id})))};
+  const value=PlanNetwork.evaluate(plans,network,(snapshot,incoming)=>{
+    const controlled=new Set((snapshot.liveLinks||[]).map(l=>l.item));
+    if([...controlled].some(id=>hasProductMaterial(id,snapshot))) return {ok:false,exports:{},message:'接收物料不能同时作为最终产物'};
+    const effective={...snapshot,_networkResolved:true,supplies:[...snapshot.supplies.filter(x=>!controlled.has(x.id)),...[...controlled].map(id=>({id,q:incoming[id]||0,stop:snapshot.supplies.find(x=>x.id===id)?.stop !== false,network:true}))]};
+    const solution=planSolve(demands(effective),effective,{mode:effective.mode});
+    const plan=summarize(solution,effective);
+    const exports=plan?canonicalDemands(demands(effective)):{};
+    if(plan) exports.Workbench_Electricity=Math.max(0,plan.generation+(plan.importedPower||0)-plan.power-(effective.extraLoad||0));
+    return {ok:solution.ok,exports,effective,solution,message:solution.ok?'':'供给、连接或产能不足'};
+  });
+  globalThis.__livePlanCache={signature,value};return value;
+}
+function resolveLiveState(s) {
+  if(s._networkResolved || !(s.liveLinks?.length)) return {state:s};
+  const report=evaluateLivePlans(s),result=report.results.get(s.planUid);
+  if(!result?.effective) return {error:report.errors.filter(e=>e.plan===s.planUid).map(e=>e.message).join('；')||'跨方案来源失效或存在循环依赖'};
+  return {state:result.effective};
+}
+
 function fresh() {
   return {
     version: 12,
+    planUid: makePlanUid(),
+    liveLinks: [],
     supplies: [],
     products: [],
     routing: { enabled: false, edges: [] },
@@ -3956,6 +4058,7 @@ function generatorWaste(s = state) {
   return {};
 }
 function supplyPool(s = state) {
+  if (!s._networkResolved && s.liveLinks?.length) { const resolved=resolveLiveState(s); if(resolved.state) s=resolved.state; }
   const pool = {};
   for (const x of s.supplies) pool[x.id] = (pool[x.id] || 0) + x.q;
   for (const n of s.nodes) {
@@ -4173,6 +4276,9 @@ function planSolve(
   s = state,
   { mode = null, target = null, flex = null, limit = null } = {},
 ) {
+  const resolved = resolveLiveState(s);
+  if (resolved.error) return {ok:false, liveError:resolved.error};
+  s = resolved.state;
   mode = mode || s.mode || "forward";
   const cap = mode === "constrained" ? s.inputConstraint : null;
   if (cap && (!I[cap.id]?.selectable || hasProductMaterial(cap.id, s)))
@@ -4269,10 +4375,11 @@ function planSolve(
     // A non-boundary supply is a finite contribution: use it first, then
     // manufacture any remaining demand, including in reverse planning.
     const partial = s.supplies.some(x => x.id === id && !x.stop);
+    const networkSupply = s.supplies.some(x => x.id === id && x.network);
     const v = { objective: target || flex || partial ? 0 : 1, [id]: 1 };
-    if (mode === "forward" || (cap && id === cap.id) || (partial && mode !== "shortage")) {
+    if (mode === "forward" || (cap && id === cap.id) || (partial && mode !== "shortage") || networkSupply) {
       model.constraints["s:" + id] = {
-        max: cap && id === cap.id ? amount(cap.q) : pool[id] || 0,
+        max: cap && id === cap.id ? (networkSupply ? Math.min(amount(cap.q), pool[id] || 0) : amount(cap.q)) : pool[id] || 0,
       };
       v["s:" + id] = 1;
     }
@@ -4285,7 +4392,7 @@ function planSolve(
       if (!v) continue;
       v.objective = 0.000001;
       v["use:" + id] = 1;
-      model.variables["short:" + id] = { objective: 1, [id]: 1 };
+      if (!s.supplies.some(x => x.id === id && x.network)) model.variables["short:" + id] = { objective: 1, [id]: 1 };
     }
   }
   if (target || flex) {
@@ -4312,6 +4419,7 @@ function planSolve(
   if (!result?.feasible || result.bounded === false)
     return { ok: false, unbounded: result?.bounded === false };
   return { ok: true, result, rs, pool, involved: [...involved], mode,
+    effectiveState: s,
     routedEdges: s.routing?.enabled ? s.routing.edges.map((e, i) => ({ ...e, q: result['route-edge:' + i] || 0 })).filter(e => e.q > 1e-6) : null };
 }
 function demands(s = state) {
@@ -4373,6 +4481,7 @@ function configure(k, eq, s = state) {
 }
 function summarize(solution, s = state) {
   if (!solution.ok) return null;
+  s = solution.effectiveState || s;
   const rows = [],
     external = {},
     surplus = {},
@@ -5174,6 +5283,7 @@ function emptyWorkspace() {
     active: { name: "未命名方案", kind: "new", id: null },
     existing: null,
     plans: [],
+    liveDrafts: {},
     nextId: 1,
     compareId: "existing",
     previous: null,
@@ -5255,17 +5365,29 @@ function normalizeWorkspace(x) {
       },
       state: validSnapshot(x.previous.state),
     };
+  const savedActive=w.plans.find(p=>p.id===w.active.id);
+  if(savedActive && !x.active?.state?.planUid) s.planUid=savedActive.state.planUid;
+  if(new Set(w.plans.map(p=>p.state.planUid)).size!==w.plans.length) throw Error('方案身份重复');
+  for(const p of w.plans) if(x.liveDrafts?.[p.state.planUid]) {
+    const draft=validSnapshot(x.liveDrafts[p.state.planUid]);
+    if(draft.planUid!==p.state.planUid) throw Error('方案草稿身份不匹配');
+    w.liveDrafts[p.state.planUid]=draft;
+  }
   return { w, s };
 }
 function workspacePayload() {
+  const drafts = {...workshop.liveDrafts};
+  if(workshop.plans.some(p=>p.state.planUid===state.planUid)) drafts[state.planUid]=copy(state);
   return {
     ...copy(workshop),
+    liveDrafts: drafts,
     active: { ...copy(workshop.active), state: copy(state) },
     gameVersion: DATA.version,
   };
 }
 function persistWorkspace() {
   if (!workspaceReady) return;
+  if(workshop.plans.some(p=>p.state.planUid===state.planUid)) (workshop.liveDrafts ??= {})[state.planUid]=copy(state);
   recordUndoHistory();
   try {
     localStorage.setItem(WORKSPACE_KEY, JSON.stringify(workspacePayload()));
@@ -5304,7 +5426,7 @@ function loadWorkspace() {
   }
 }
 function exportSinglePlan(plan = null) {
-  const source = plan || { ...workshop.active, state };
+  const source = plan ? {...plan,state:workshop.liveDrafts?.[plan.state.planUid] || plan.state} : { ...workshop.active, state };
   const payload = PlanFiles.payload(source, DATA.version);
   download(PlanFiles.filename(payload.name), JSON.stringify(payload, null, 2));
 }
@@ -5316,7 +5438,7 @@ async function importWorkspaceFile(e) {
       JSON.parse(await file.text()), file.name.replace(/\.json$/i, ''), validSnapshot,
     )));
     const incoming = batches.flat();
-    workshop = PlanFiles.merge(workshop, incoming);
+    workshop = PlanFiles.merge(workshop, incoming, state.planUid);
     workspaceReady = true;
     save();
     renderWorkspace();
@@ -5681,7 +5803,8 @@ function rememberEditing() {
 }
 function loadNamedPlan(p) {
   rememberEditing();
-  state = validSnapshot(p.state);
+  if(workshop.plans.some(p=>p.state.planUid===state.planUid)) (workshop.liveDrafts ??= {})[state.planUid]=copy(state);
+  state = validSnapshot(workshop.liveDrafts?.[p.state.planUid] || p.state);
   workshop.active = { name: p.name, kind: p.kind || "new", id: p.id || null };
   renderAll();
   renderWorkspace();
@@ -5735,6 +5858,7 @@ function initProjects() {
     const id = workshop.nextId++,
       name = cleanTitle($("activePlanName").value, "方案" + id),
       kind = $("activePlanKind").value;
+    state.planUid = makePlanUid();
     workshop.plans.push({
       id,
       name,
@@ -9575,6 +9699,12 @@ function safeState(x) {
     );
   for (const product of x.products || []) ensureProductItem(product.id);
   const s = fresh();
+  s.planUid = typeof x.planUid === 'string' && x.planUid.length <= 100 ? x.planUid : s.planUid;
+  s.liveLinks = Array.isArray(x.liveLinks) ? x.liveLinks.map(l => {
+    if (!l || typeof l.id !== 'string' || typeof l.from !== 'string' || !I[l.item]?.selectable || !Number.isFinite(l.rate) || l.rate < 0 || l.rate > 1e8) throw Error('跨方案连接数据无效');
+    return {id:l.id,from:l.from,item:l.item,rate:l.rate};
+  }) : [];
+  if(new Set(s.liveLinks.map(l=>l.id)).size !== s.liveLinks.length) throw Error('跨方案连接编号重复');
   s.geothermal = normalizeGeothermal(x.geothermal);
   s.optimizationSettings = normalizeOptimizationSettings(x.optimizationSettings);
   s.optimizationReport = x.optimizationReport && Number.isFinite(x.optimizationReport.points) ? copy(x.optimizationReport) : null;
@@ -9815,10 +9945,13 @@ function controls() {
   renderInputConstraint();
 }
 function renderSupplies() {
+  const controlled = new Set((state.liveLinks || []).map(l => l.item));
+  const resolved = resolveLiveState(state);
+  const supplies = [...state.supplies.filter(x=>!controlled.has(x.id)), ...[...controlled].map(id=>({id,q:resolved.state?.supplies.find(x=>x.id===id&&x.network)?.q||0,network:true}))];
   $("supplies").innerHTML =
-    state.supplies
+    supplies
       .map(
-        (x) =>
+        (x) => x.network ? `<div class="card"><b>${esc(I[x.id].name)}</b><p>实时接入 ${fmt(x.q)} ${unit(x.id)}</p><label><input type="checkbox" data-live-continue="${esc(x.id)}" ${state.supplies.some(s=>s.id===x.id&&!s.stop)?"checked":""}> 不足部分继续生产</label><button data-live-open>管理跨方案连接</button></div>` :
           `<div class="card"><div class="top"><div class="itemhead">${icon(x.id)}<div><b>${esc(I[x.id].name)}</b><small style="display:block">${esc(I[x.id].en)}</small></div></div><button data-delsupply="${x.id}" aria-label="移除${esc(I[x.id].name)}">×</button></div><label class="rowfield">${unit(x.id)}<input data-supply="${x.id}" type="number" min="0" max="100000000" step="any" value="${displayNumber(cleanComputedQuantity(x.q))}" ${x.lock ? "disabled" : ""}></label><label><input data-supplylock="${x.id}" type="checkbox" ${x.lock ? "checked" : ""}> 锁定供给数量</label><label class="small"><input data-stop="${x.id}" type="checkbox" ${x.stop ? "checked" : ""}> 作为产线起点，不再制造此物品</label></div>`,
       )
       .join("") || '<div class="empty">尚未添加外部供给</div>';
@@ -9936,6 +10069,7 @@ function machineLabel(row) {
   return a.join(" ＋ ") || "0台";
 }
 function diagnosePlanFailure(s = state, solution = {}) {
+  if(solution.liveError) return {reason:solution.liveError,missing:[],checks:[]};
   if (solution.routingError) return { reason: solution.routingError, missing: [], checks: [] };
   if (s.routing?.enabled && planSolve(demands(s), {...s, routing:{...s.routing, enabled:false}}, {mode:s.mode}).ok)
     return { reason: '手动连接无法满足产线：请检查缺失的输入连接、供给数量或连接端点。', missing: [], checks: [] };
@@ -10065,6 +10199,7 @@ function renderResults() {
   const solution = planSolve(demands(), state, { mode: state.mode });
   current = summarize(solution);
   renderRouting();
+  renderLivePlanLinks();
   dirtyGraph = true;
   graphPreview = null;
   refreshSingleOutput();
@@ -11902,6 +12037,109 @@ function renderOptimizationPlanSummary() {
   const r=state.optimizationReport;el.hidden=!r;if(!r)return;
   el.innerHTML=`<b>本方案来自回收优化</b><p>生成时回收 ${fmt(r.points)} 点/分；晶体预算统计 ${r.installedSloops} 个，含 ${r.augmenters} 座增幅器占用的 ${r.augmenters*10} 个。${r.fueledAugmenters?`异星能量矩阵 ${r.fueledAugmenters*5}/分为增幅器燃料，不送回收。`:''}</p>`;
 }
+
+/* Live links are stored on the receiving plan; source identities survive renames. */
+function liveLinkState(uid) {
+  if(state.planUid === uid) return state;
+  const saved=workshop.plans.find(p=>p.state.planUid===uid);
+  return saved ? workshop.liveDrafts?.[uid] || saved.state : undefined;
+}
+function addLivePlanLink(from,to,item,rate) {
+  const destination=liveLinkState(to), source=liveLinkState(from);
+  if(!source || !destination || from===to) throw Error('请选择两个不同的方案');
+  if(!workshop.plans.some(p=>p.state.planUid===from)) throw Error('请先保存来源方案，再建立供货连接');
+  if(!I[item]?.selectable || !Number.isFinite(rate) || rate<0 || rate>1e8) throw Error('物料或接入量无效');
+  if(hasProductMaterial(item,destination)) throw Error('接收物料不能同时作为最终产物');
+  if(destination.supplies.some(x=>x.id===item&&x.lock)) throw Error('请先解除接收方案中该物料的供给锁定');
+  const prior=destination.liveLinks || [];
+  if(prior.some(l=>l.from===from&&l.item===item)) throw Error('该连接已存在，可直接修改接入量');
+  const link={id:makePlanUid(),from,item,rate};
+  destination.liveLinks=[...prior,link];
+  const report=evaluateLivePlans();
+  const cycle=report.errors.find(e=>e.message.includes('循环依赖'));
+  if(cycle) { destination.liveLinks=prior; throw Error(cycle.message); }
+  return link;
+}
+function renderLivePlanLinks() {
+  if(!$('livePlanPanel')) return;
+  const records=livePlanRecords(),report=evaluateLivePlans();
+  const select=(id,choices)=>{
+    const el=$(id),old=el.value;
+    el.innerHTML=choices.map(([v,t])=>`<option value="${esc(v)}">${esc(t)}</option>`).join('');
+    if(choices.some(([v])=>v===old)) el.value=old;
+  };
+  select('liveFrom',records.map(p=>[p.id,p.name]));
+  select('liveTo',records.map(p=>[p.id,p.name]));
+  if(!$('liveTo').dataset.initialized) { $('liveTo').value=state.planUid; $('liveTo').dataset.initialized='1'; }
+  const source=records.find(p=>p.id===$('liveFrom').value);
+  const declared=source?canonicalDemands(demands(source.state)):{};
+  const exported=source?report.results.get(source.id)?.exports||{}:{};
+  const items=[...new Set([...Object.keys(declared),...Object.keys(exported)])].filter(id=>I[id]?.selectable);
+  select('liveItem',items.map(id=>[id,I[id].name]));
+  const rows=records.flatMap(p=>(p.state.liveLinks||[]).map(l=>({p,l,a:report.allocations.get(p.id+':'+l.id)})));
+  $('livePlanStatus').textContent=rows.length?'源方案编辑后立即重新计算，切换方案和刷新后保留。接入同物料后替代接收方案的手填供给。':'选择来源与接收方案，或从画布输出端口拖到另一张方案卡片。';
+  $('livePlanRows').innerHTML=rows.length?`<div class="tablewrap"><table><thead><tr><th>来源</th><th>接收方案</th><th>物料</th><th>申请 / 分</th><th>分配 / 分</th><th>缺口 / 分</th><th></th></tr></thead><tbody>${rows.map(({p,l,a})=>`<tr><td>${esc(records.find(x=>x.id===l.from)?.name||'来源缺失')}</td><td>${esc(p.name)}</td><td>${esc(I[l.item]?.name||l.item)}</td><td><input aria-label="申请接入量" type="number" min="0" max="100000000" step="any" data-live-rate="${esc(l.id)}" data-live-owner="${esc(p.id)}" value="${displayNumber(l.rate)}"></td><td>${a?fmt(a.actual):'—'}</td><td class="${a?.shortage>EPS?'over':''}">${a?fmt(a.shortage):'—'}</td><td><button data-live-delete="${esc(l.id)}" data-live-owner="${esc(p.id)}">断开</button></td></tr>`).join('')}</tbody></table></div>`:'';
+  $('livePlanErrors').innerHTML=report.errors.map(e=>`<p class="over">${esc((records.find(p=>p.id===e.plan)?.name||'连接')+'：'+e.message)}</p>`).join('') + records.filter(p=>report.results.get(p.id)?.ok===false).map(p=>`<p class="over">${esc(p.name)}：${esc(report.results.get(p.id).message||'产线不可行')}</p>`).join('');
+  const cols=Math.min(3,Math.max(1,records.length)),width=cols*340,height=Math.ceil(records.length/cols)*300;
+  let svg=`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" aria-label="跨方案实时供给画布">`;
+  const ports=new Map(),positions=new Map();
+  const rowHeights=[];
+  records.forEach((p,i)=>{const count=Object.keys(canonicalDemands(demands(p.state))).length+1;const row=Math.floor(i/cols);rowHeights[row]=Math.max(rowHeights[row]||300,110+count*25);});
+  records.forEach((p,i)=>{const x=(i%cols)*340+20,y=rowHeights.slice(0,Math.floor(i/cols)).reduce((a,b)=>a+b,20);positions.set(p.id,{x,y});});
+  records.forEach(p=>{
+    const pos=positions.get(p.id),result=report.results.get(p.id),products=canonicalDemands(demands(p.state));
+    const ids=[...new Set([...Object.keys(products),...Object.keys(result?.exports||{})])].filter(id=>I[id]?.selectable && (id!=='Workbench_Electricity' || (result?.exports[id]||0)>EPS));
+    // All outputs stay accessible; cards scroll as a group for large plans.
+    const h=Math.max(120,70+ids.length*25);pos.h=h;
+    svg+=`<g data-live-target="${esc(p.id)}" transform="translate(${pos.x},${pos.y})"><rect width="290" height="${h}" rx="10" fill="${result?.ok?'#fff':'#fff0ed'}" stroke="#536778"/><text x="12" y="25" fill="#111" font-size="14">${esc(p.name.slice(0,24))}</text><text x="12" y="47" fill="#555" font-size="12">${result?.ok?'可供货':'不可行 / 来源失效'}</text>`;
+    ids.forEach((id,j)=>{const py=70+j*25;ports.set(p.id+':'+id,{x:pos.x+290,y:pos.y+py});svg+=`<text x="12" y="${py+4}" font-size="12" fill="#111">${esc(I[id]?.name||id)} ${fmt(result?.exports[id]||0)}/分</text><circle data-live-output="${esc(p.id)}" data-live-item="${esc(id)}" cx="290" cy="${py}" r="8" fill="#198d9c" style="cursor:crosshair;touch-action:none"><title>拖到接收方案</title></circle>`;});svg+='</g>';
+  });
+  for(const {p,l,a} of rows){const start=ports.get(l.from+':'+l.item),end=positions.get(p.id);if(start&&end)svg+=`<path d="M${start.x} ${start.y} C${start.x+65} ${start.y} ${end.x-40} ${end.y+40} ${end.x} ${end.y+40}" fill="none" stroke="${a?.shortage>EPS?'#c33':'#218c98'}" stroke-width="2" pointer-events="none"><title>${esc(I[l.item]?.name||l.item)} ${a?fmt(a.actual):'—'}/分</title></path>`;}
+  svg+='</svg>';$('livePlanCanvas').innerHTML=svg;
+  const bottom=Math.max(height,...[...positions.values()].map(p=>p.y+(p.h||0)+20));
+  const el=$('livePlanCanvas').querySelector('svg');el.setAttribute('height',bottom);el.setAttribute('viewBox',`0 0 ${width} ${bottom}`);
+}
+function initLivePlanLinks() {
+  const fail=e=>{ $('livePlanMessage').textContent=e.message; };
+  for(const id of ['liveFrom','liveTo']) $(id).onchange=renderLivePlanLinks;
+  $('liveAdd').onclick=()=>{try { addLivePlanLink($('liveFrom').value,$('liveTo').value,$('liveItem').value,Number($('liveRate').value));$('livePlanMessage').textContent='';renderAll(); }catch(e){fail(e)} };
+  $('livePlanRows').addEventListener('change',e=>{
+    const id=e.target.dataset.liveRate;if(!id)return;
+    const owner=liveLinkState(e.target.dataset.liveOwner),link=owner?.liveLinks.find(x=>x.id===id),rate=Number(e.target.value);
+    if(!link||!e.target.value.trim()||!Number.isFinite(rate)||rate<0||rate>1e8){fail(Error('请输入有效接入量'));renderLivePlanLinks();return;}
+    link.rate=rate;renderAll();
+  });
+  $('livePlanRows').onclick=e=>{const b=e.target.closest('[data-live-delete]');if(!b)return;const owner=liveLinkState(b.dataset.liveOwner);owner.liveLinks=owner.liveLinks.filter(x=>x.id!==b.dataset.liveDelete);renderAll();};
+  const host=$('livePlanCanvas');let dragging=null;
+  host.onpointerdown=e=>{
+    const port=e.target.closest('[data-live-output]');if(!port||e.button!==0)return;
+    e.preventDefault();
+    const svg=host.querySelector('svg'),p=svg.createSVGPoint();p.x=e.clientX;p.y=e.clientY;
+    const start=p.matrixTransform(svg.getScreenCTM().inverse()),line=document.createElementNS('http://www.w3.org/2000/svg','path');
+    for(const [k,v] of Object.entries({stroke:'#e58000','stroke-width':'3',fill:'none','pointer-events':'none'}))line.setAttribute(k,v);
+    svg.append(line);dragging={from:port.dataset.liveOutput,item:port.dataset.liveItem,id:e.pointerId,start,line};host.setPointerCapture(e.pointerId);port.setAttribute('stroke','#e58000');port.setAttribute('stroke-width','4');
+  };
+  host.onpointermove=e=>{
+    if(!dragging||dragging.id!==e.pointerId)return;e.preventDefault();
+    const svg=host.querySelector('svg'),p=svg.createSVGPoint();p.x=e.clientX;p.y=e.clientY;const q=p.matrixTransform(svg.getScreenCTM().inverse()),a=dragging.start;
+    dragging.line.setAttribute('d',`M${a.x} ${a.y} C${a.x+70} ${a.y} ${q.x-70} ${q.y} ${q.x} ${q.y}`);
+  };
+  host.onpointerup=e=>{
+    if(!dragging||dragging.id!==e.pointerId)return;
+    const d=dragging;dragging=null;d.line.remove();if(host.hasPointerCapture(e.pointerId))host.releasePointerCapture(e.pointerId);
+    const target=document.elementFromPoint(e.clientX,e.clientY)?.closest('[data-live-target]');
+    try{if(!target)throw Error('请拖到接收方案卡片');const report=evaluateLivePlans(),available=report.results.get(d.from)?.exports[d.item]||0;addLivePlanLink(d.from,target.dataset.liveTarget,d.item,available);$('livePlanMessage').textContent='连接已建立，可在表格调整申请量';renderAll();}catch(err){fail(err);renderLivePlanLinks();}
+  };
+  host.onpointercancel=e=>{if(dragging?.id===e.pointerId){dragging.line.remove();dragging=null;if(host.hasPointerCapture(e.pointerId))host.releasePointerCapture(e.pointerId);renderLivePlanLinks();}};
+  document.addEventListener('change',e=>{
+    const id=e.target.dataset.liveContinue;if(!id)return;
+    let supply=state.supplies.find(x=>x.id===id);if(!supply){supply={id,q:0,stop:true};state.supplies.push(supply);}
+    supply.stop=!e.target.checked;renderAll();
+  });
+  document.addEventListener('click',e=>{if(!e.target.closest('[data-live-open]'))return;switchTab('graph');$('livePlanPanel').open=true;$('livePlanPanel').scrollIntoView({block:'start'});});
+  renderLivePlanLinks();
+}
+initLivePlanLinks();
 
 </script><script>
 (async () => {

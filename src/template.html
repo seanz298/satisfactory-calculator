@@ -328,6 +328,13 @@
               >橙：成品 · 青：外供 · 绿：工序 · 红：余量</span
             >
           </div>
+          <details id="livePlanPanel" open>
+            <summary>跨方案实时连接</summary>
+            <p id="livePlanStatus"></p>
+            <div class="formgrid"><label>来源方案<select id="liveFrom"></select></label><label>接收方案<select id="liveTo"></select></label><label>物料<select id="liveItem"></select></label><label>申请 / 分<input id="liveRate" type="number" min="0" max="100000000" step="any" value="0"></label></div>
+            <button id="liveAdd">建立实时连接</button><p id="livePlanMessage" role="status"></p>
+            <div id="livePlanErrors"></div><div id="livePlanCanvas" style="overflow:auto;max-height:650px;touch-action:pan-x pan-y"></div><div id="livePlanRows"></div>
+          </details>
           <div id="graphPreviewLabel" class="notice" hidden></div>
           <details id="routingPanel">
             <summary>手动连接物料</summary>

@@ -35,7 +35,7 @@ const PlanNetwork = (() => {
     }
     // Validate all endpoints, including links whose destination was removed.
     for(const l of links) if(!by.has(l.from)||!by.has(l.to)) errors.push({link:l.id,message:'连接引用了不存在的方案'});
-    if(!errors.length) for(const id of by.keys()) {
+    for(const id of by.keys()) {
       try { visit(id); } catch(e) { errors.push({plan:id,message:e.message}); visiting.clear(); }
     }
     return {ok:errors.length===0&&[...results.values()].every(x=>x.ok),results,allocations,errors};
