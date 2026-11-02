@@ -329,6 +329,16 @@
             >
           </div>
           <div id="graphPreviewLabel" class="notice" hidden></div>
+          <details id="routingPanel">
+            <summary>手动连接物料</summary>
+            <div class="buttons"><button id="routingSeed">从自动产线生成连接</button><button id="routingToggle">启用手动连接</button></div>
+            <p id="routingStatus"></p>
+            <div id="routingEditor" hidden>
+              <div class="formgrid"><label>来源<select id="routingFrom"></select></label><label>物料<select id="routingItem"></select></label><label>去向<select id="routingTo"></select></label><label>线路上限 / 分（留空为不限）<input id="routingLimit" type="number" min="0" step="any"></label></div>
+              <button id="routingAdd">添加连接</button>
+              <div id="routingList"></div>
+            </div>
+          </details>
           <div id="mindControls" hidden>
             <div class="board-toolbar">
               <select id="mindProduct" aria-label="按最终产物筛选">

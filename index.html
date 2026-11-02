@@ -2781,6 +2781,16 @@ html[lang="en"] .board-caption {
             >
           </div>
           <div id="graphPreviewLabel" class="notice" hidden></div>
+          <details id="routingPanel">
+            <summary>手动连接物料</summary>
+            <div class="buttons"><button id="routingSeed">从自动产线生成连接</button><button id="routingToggle">启用手动连接</button></div>
+            <p id="routingStatus"></p>
+            <div id="routingEditor" hidden>
+              <div class="formgrid"><label>来源<select id="routingFrom"></select></label><label>物料<select id="routingItem"></select></label><label>去向<select id="routingTo"></select></label><label>线路上限 / 分（留空为不限）<input id="routingLimit" type="number" min="0" step="any"></label></div>
+              <button id="routingAdd">添加连接</button>
+              <div id="routingList"></div>
+            </div>
+          </details>
           <div id="mindControls" hidden>
             <div class="board-toolbar">
               <select id="mindProduct" aria-label="按最终产物筛选">
@@ -3721,6 +3731,7 @@ function fresh() {
     version: 12,
     supplies: [],
     products: [],
+    routing: { enabled: false, edges: [] },
     nodes: [],
     selected: {},
     clock: 100,
@@ -4117,6 +4128,46 @@ function rates(k, s = state) {
     ),
   };
 }
+function addRoutingConstraints(model, s, rs, demand, target, flex) {
+  const outputs = new Map(), inputs = new Map(), edges = s.routing.edges;
+  const key = (node, item) => JSON.stringify([node, item]);
+  const put = (map, node, item, variable, coefficient, bound) => {
+    const id = key(node, item), name = `route:${map === outputs ? 'out' : 'in'}:${id}`;
+    map.set(id, name);
+    model.constraints[name] = bound;
+    if (variable) model.variables[variable][name] = coefficient;
+  };
+  for (const recipe of rs) {
+    const rr = rates(recipe, s);
+    for (const [item, q] of Object.entries(rr.outs)) put(outputs, recipe, item, recipe, -q, {max: 0});
+    for (const [item, q] of Object.entries(rr.ins)) put(inputs, recipe, item, recipe, -q, {min: 0});
+  }
+  for (const v of Object.keys(model.variables)) if (v.startsWith('ext:')) {
+    const item = v.slice(4);
+    put(outputs, 'e:' + item, item, v, -1, {max: 0});
+    if (model.variables['short:' + item]) model.variables['short:' + item][outputs.get(key('e:' + item, item))] = -1;
+  }
+  const requested = new Set([...s.products.map(p => p.id), ...Object.keys(demand), ...(target ? [target] : []), ...Object.keys(flex || {})]);
+  for (const id of requested) {
+    const name = `route:in:${key('p:' + id, materialId(id))}`;
+    inputs.set(key('p:' + id, materialId(id)), name);
+    model.constraints[name] = { min: demand[id] || 0 };
+    const multiplier = target === id ? 1 : flex?.[id] || 0;
+    if (multiplier && model.variables.goal) model.variables.goal[name] = -multiplier;
+  }
+  for (let i = 0; i < edges.length; i++) {
+    const edge = edges[i], from = outputs.get(key(edge.from, edge.item)), to = inputs.get(key(edge.to, edge.item));
+    if (!from || !to) return { error: '连线端点或物料已失效，请重新设置连接。' };
+    const variable = { objective: 0, [from]: 1, [to]: 1 };
+    if (edge.limit !== null && edge.limit !== undefined) {
+      const cap = 'route-limit:' + i;
+      model.constraints[cap] = {max: edge.limit};
+      variable[cap] = 1;
+    }
+    model.variables['route-edge:' + i] = variable;
+  }
+  return {};
+}
 function planSolve(
   demand,
   s = state,
@@ -4253,10 +4304,15 @@ function planSolve(
     }
     model.variables.goal = v;
   }
+  if (s.routing?.enabled) {
+    const routing = addRoutingConstraints(model, s, rs, demand, target, flex);
+    if (routing.error) return { ok: false, routingError: routing.error };
+  }
   const result = solver.Solve(model);
   if (!result?.feasible || result.bounded === false)
     return { ok: false, unbounded: result?.bounded === false };
-  return { ok: true, result, rs, pool, involved: [...involved], mode };
+  return { ok: true, result, rs, pool, involved: [...involved], mode,
+    routedEdges: s.routing?.enabled ? s.routing.edges.map((e, i) => ({ ...e, q: result['route-edge:' + i] || 0 })).filter(e => e.q > 1e-6) : null };
 }
 function demands(s = state) {
   return Object.fromEntries(
@@ -4373,6 +4429,7 @@ function summarize(solution, s = state) {
     s.nodes.reduce((a, n) => a + nodeOutput(n).power, 0) * s.powerMult;
   return {
     rows,
+    routedEdges: solution.routedEdges,
     external,
     surplus,
     input,
@@ -4566,6 +4623,12 @@ function flowGraph(plan, s = state) {
     supply = {};
   const add = (id, label, type, info = {}) =>
     nodes.push({ id, label, type, ...info });
+  if (plan.routedEdges) {
+    for (const [id, q] of Object.entries(plan.external)) if (q > 1e-6) add('e:' + id, I[id].name, 'external', {item:id,q});
+    for (const row of plan.rows) add(row.k, R[row.k].name, 'recipe', {row,item:Object.keys(row.outs)[0]});
+    for (const p of s.products) if (p.q > 1e-6) add('p:' + p.id, productTitle(p.id, s), 'product', {item:p.id,q:p.q});
+    return {nodes, edges: plan.routedEdges.filter(e => nodes.some(n => n.id === e.from) && nodes.some(n => n.id === e.to))};
+  }
   for (const [id, q] of Object.entries(plan.external))
     if (q > 1e-6) {
       add("e:" + id, I[id].name, "external", { item: id, q });
@@ -9578,6 +9641,7 @@ function safeState(x) {
     pipe: +x.transport?.pipe === 300 ? 300 : 600,
   };
   s.board = normalizeBoard(x.board);
+  s.routing = { enabled: !!x.routing?.enabled, edges: Array.isArray(x.routing?.edges) ? x.routing.edges.filter(e => typeof e?.from === 'string' && typeof e?.to === 'string' && !!I[e.item] && (e.limit == null || (Number.isFinite(e.limit) && e.limit >= 0))).slice(0, 2000).map(e => ({from:e.from,to:e.to,item:e.item,limit:e.limit == null ? null : amount(e.limit)})) : [] };
   s.rail = normalizeRail(x.rail);
   s.sloops = Object.fromEntries(
     Object.entries(x.sloops || {})
@@ -9863,6 +9927,9 @@ function machineLabel(row) {
   return a.join(" ＋ ") || "0台";
 }
 function diagnosePlanFailure(s = state, solution = {}) {
+  if (solution.routingError) return { reason: solution.routingError, missing: [], checks: [] };
+  if (s.routing?.enabled && planSolve(demands(s), {...s, routing:{...s.routing, enabled:false}}, {mode:s.mode}).ok)
+    return { reason: '手动连接无法满足产线：请检查缺失的输入连接、供给数量或连接端点。', missing: [], checks: [] };
   if (solution.constraintConflict)
     return { reason: "单输入约束物料不能同时作为最终产物，请更换约束物料。", missing: [], checks: [] };
   if (solution.unbounded)
@@ -9897,9 +9964,60 @@ function diagnosePlanFailure(s = state, solution = {}) {
     missing, checks,
   };
 }
+function routingAutomaticGraph() {
+  const s = {...state, routing: {enabled:false, edges:[]}};
+  const result = planSolve(demands(s), s, {mode:s.mode});
+  const plan = summarize(result, s);
+  return plan ? flowGraph(plan, s) : null;
+}
+function renderRouting() {
+  if (!$('routingPanel')) return;
+  const routing = state.routing || {enabled:false,edges:[]};
+  $('routingToggle').textContent = routing.enabled ? '切回自动连接' : '启用手动连接';
+  $('routingEditor').hidden = !routing.enabled;
+  $('routingStatus').textContent = routing.enabled ? '手动连接参与物料计算；未连接的工序不会自动供料。' : '自动生成连接，不限制物料流向。';
+  if (!routing.enabled) return;
+  const graph = routingAutomaticGraph();
+  const nodes = graph?.nodes.filter(n => n.type !== 'surplus') || [];
+  const select = (id, choices) => {
+    const el = $(id), previous = el.value;
+    el.innerHTML = choices.map(([v, label]) => `<option value="${esc(v)}">${esc(label)}</option>`).join('');
+    if (choices.some(([v]) => v === previous)) el.value = previous;
+  };
+  select('routingFrom', nodes.filter(n => n.type !== 'product').map(n => [n.id,n.label]));
+  select('routingTo', nodes.filter(n => n.type !== 'external').map(n => [n.id,n.label]));
+  const from = $('routingFrom').value, to = $('routingTo').value;
+  const produced = from.startsWith('e:') ? [from.slice(2)] : Object.keys(R[from]?.outs || {});
+  const accepted = to.startsWith('p:') ? [materialId(to.slice(2))] : Object.keys(R[to]?.ins || {});
+  select('routingItem', produced.filter(id => accepted.includes(id)).map(id => [id,I[id]?.name || id]));
+  const labels = new Map(nodes.map(n => [n.id,n.label]));
+  $('routingList').innerHTML = routing.edges.length ? `<div class="tablewrap"><table><thead><tr><th>来源</th><th>物料</th><th>去向</th><th>上限 / 分</th><th>实际 / 分</th><th></th></tr></thead><tbody>${routing.edges.map((e,i) => `<tr><td>${esc(labels.get(e.from) || e.from)}</td><td>${esc(I[e.item]?.name || e.item)}</td><td>${esc(labels.get(e.to) || e.to)}</td><td>${e.limit == null ? '不限' : fmt(e.limit)}</td><td>${current ? fmt(current.routedEdges?.find(x => x.from === e.from && x.to === e.to && x.item === e.item)?.q || 0) : '—'}</td><td><button data-routing-remove="${i}">删除</button></td></tr>`).join('')}</tbody></table></div>` : '<p>尚无连接。</p>';
+}
+function initRouting() {
+  $('routingSeed').onclick = () => {
+    const graph = routingAutomaticGraph();
+    if (!graph) { setStatus('当前方案不可行，无法生成自动连接。', true); return; }
+    state.routing = {enabled:true, edges:graph.edges.filter(e => !e.to.startsWith('w:')).map(e => ({from:e.from,to:e.to,item:e.item,limit:null}))};
+    renderAll();
+  };
+  $('routingToggle').onclick = () => { state.routing.enabled = !state.routing.enabled; renderAll(); };
+  $('routingFrom').onchange = renderRouting;
+  $('routingTo').onchange = renderRouting;
+  $('routingAdd').onclick = () => {
+    const from=$('routingFrom').value, to=$('routingTo').value, item=$('routingItem').value, raw=$('routingLimit').value.trim(), limit=raw === '' ? null : Number(raw);
+    if (!from || !to || !item || from === to || (limit !== null && (!Number.isFinite(limit) || limit < 0))) { setStatus('请选择兼容的来源、物料、去向及有效上限。', true); return; }
+    if (state.routing.edges.some(e => e.from === from && e.to === to && e.item === item)) { setStatus('该连接已存在，请先删除原连接。', true); return; }
+    state.routing.edges.push({from,to,item,limit}); renderAll();
+  };
+  $('routingList').onclick = e => {
+    const button = e.target.closest('[data-routing-remove]'); if (!button) return;
+    state.routing.edges.splice(Number(button.dataset.routingRemove),1); renderAll();
+  };
+}
 function renderResults() {
   const solution = planSolve(demands(), state, { mode: state.mode });
   current = summarize(solution);
+  renderRouting();
   dirtyGraph = true;
   graphPreview = null;
   refreshSingleOutput();
@@ -11609,6 +11727,8 @@ function initMachineGroups() {
   });
 }
 initMachineGroups();
+
+initRouting();
 
 // Optimization runs in an isolated worker; existing planning remains responsive.
 const OPT_TABLES=globalThis.__factoryBundle.optimization;
