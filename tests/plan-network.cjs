@@ -1,0 +1,11 @@
+const assert=require('node:assert/strict'),N=require('../src/plan-network.js');
+const plans=[{id:'a',state:{output:100}},{id:'b',state:{}},{id:'c',state:{}}];
+const network={version:1,links:[{id:'ab',from:'a',to:'b',item:'iron',rate:80},{id:'ac',from:'a',to:'c',item:'iron',rate:80}]};
+const calc=(s,incoming)=>({ok:true,exports:{iron:s.output||0},incoming});
+let r=N.evaluate(plans,network,calc);assert(r.ok);assert.equal(r.allocations.get('ab').actual,50);assert.equal(r.allocations.get('ac').actual,50);
+plans[0].state.output=40;r=N.evaluate(plans,JSON.parse(JSON.stringify(network)),calc);assert.equal(r.results.get('b').incoming.iron,20);
+const cycle={version:1,links:[...network.links,{id:'ba',from:'b',to:'a',item:'iron',rate:1}]};assert(!N.evaluate(plans,cycle,calc).ok);
+assert(!N.evaluate(plans,{version:1,links:[{id:'x',from:'missing',to:'b',item:'iron',rate:1}]},calc).ok);
+assert.throws(()=>N.normalize({version:1,links:[{id:'bad',rate:NaN}]}));
+const before=JSON.stringify(plans);N.evaluate(plans,network,(s,i)=>{s.output=999;return calc(s,i)});assert.equal(JSON.stringify(plans),before);
+console.log('Cross-plan capacities, source changes, cycles, dangling references, round trip and immutability PASS');

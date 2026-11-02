@@ -20,7 +20,7 @@ def build():
     pieces = {
         '<!--APP_STYLES-->': '<style>\n' + read('styles.css') + '\n</style>',
         '<!--SOLVER-->': '<script>\n' + read('solver.js') + '\n</script>',
-        '<!--APP_CODE-->': '<script id="factorySource" type="text/plain">\n' + (read('plan-files.js') + '\n' + read('optimizer-core.js') + '\n' + read('app.js') + '\n' + read('optimizer-ui.js')) + '\n</script>',
+        '<!--APP_CODE-->': '<script id="factorySource" type="text/plain">\n' + (read('plan-files.js') + '\n' + read('plan-network.js') + '\n' + read('optimizer-core.js') + '\n' + read('app.js') + '\n' + read('optimizer-ui.js') + '\n' + read('live-plan-links.js')) + '\n</script>',
         '<!--BOOTSTRAP-->': '<script>\n' + bootstrap.replace('__BUNDLE_BASE64__', encoded) + '\n</script>',
     }
     html = read('template.html')
