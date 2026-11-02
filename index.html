@@ -2820,7 +2820,7 @@ html[lang="en"] .board-caption {
             </div>
             <div class="board-caption">
               <span id="boardCount"></span
-              ><span>拖动卡片排版 · 拖动空白平移 · Ctrl＋滚轮缩放</span>
+              ><span>拖动卡片排版 · 启用手动连接后拖动物料端口连线 · Ctrl＋滚轮缩放</span>
             </div>
 
           </div>
@@ -8525,9 +8525,17 @@ function boardPort(n, item, output) {
   return { x: n.x + (output ? 380 : 0), y: n.y + (n.fold ? 76 : 148 + i * 42) };
 }
 function renderProductionMind() {
-  const plan = graphPreview?.plan || current,
+  let plan = graphPreview?.plan || current,
     s = graphPreview?.s || state,
     chosen = $("mindProduct").value;
+  let editingFallback = false;
+  // Keep the editing canvas available even when a missing connection makes
+  // the constrained plan infeasible.
+  if (!plan && !graphPreview && s.routing?.enabled) {
+    const autoState = {...s, routing:{enabled:false,edges:[]}};
+    const autoPlan = summarize(planSolve(demands(autoState), autoState), autoState);
+    if (autoPlan) { plan = {...autoPlan, routedEdges:s.routing.edges.map(e => ({...e,q:0}))}; editingFallback = true; }
+  }
   $("mindProduct").innerHTML =
     '<option value="">全部最终产物</option>' +
     s.products
@@ -8574,6 +8582,7 @@ function renderProductionMind() {
   paintBoard();
   renderBoardDetail();
   $("boardCount").textContent =
+    editingFallback ? '当前连接不可行，显示自动方案的节点供修复；线路流量尚未求解。' :
     `${flow.nodes.length} 张卡片 · ${flow.edges.length} 条连接 · ${fmt(plan.power)} MW 耗电 · ${fmt(plan.generation || 0)} MW 发电`;
 }
 function boardColor(n) {
@@ -8662,7 +8671,7 @@ function paintBoard() {
         for (const [[id, q], i] of ports.map((p, i) => [p, i])) {
           const x = side ? 207 : 14,
             y = 148 + i * 42;
-          svg += `<circle cx="${side ? 380 : 0}" cy="${y}" r="4.5" fill="${I[id]?.fluid ? "#52a9c0" : color}"/>${ICONS[id] ? `<image href="${ICONS[id]}" x="${x}" y="${y - 10}" width="22" height="22"/>` : ""}${boardText(I[id].name, x + 27, y, 11, "#334155", 12)}${boardText(fmt(q) + " " + unit(id), x + 27, y + 16, 11, "#172534", 23)}`;
+          svg += `<circle data-route-port="${side ? 'out' : 'in'}" data-route-node="${esc(n.id)}" data-route-item="${esc(id)}" cx="${side ? 380 : 0}" cy="${y}" r="8" fill="${I[id]?.fluid ? "#52a9c0" : color}" stroke="white" stroke-width="2" style="cursor:crosshair;touch-action:none"><title>${side ? '拖动输出端口连接输入' : '物料输入端口'}</title></circle>${ICONS[id] ? `<image href="${ICONS[id]}" x="${x}" y="${y - 10}" width="22" height="22"/>` : ""}${boardText(I[id].name, x + 27, y, 11, "#334155", 12)}${boardText(fmt(q) + " " + unit(id), x + 27, y + 16, 11, "#172534", 23)}`;
         }
       if (row)
         svg += `<path d="M14 ${n.h - 40}H366" stroke="#edf1f5"/>${boardText("末台" + (row.duty < 0.999999 ? "平均" : "") + "产出：" + lastMachineOutputText(row), 14, n.h - 18, 10, "#64748b", 48)}`;
@@ -10013,6 +10022,44 @@ function initRouting() {
     const button = e.target.closest('[data-routing-remove]'); if (!button) return;
     state.routing.edges.splice(Number(button.dataset.routingRemove),1); renderAll();
   };
+  const host = $('productionMind');
+  let dragging = null;
+  const point = (svg, x, y) => {
+    const p = svg.createSVGPoint(); p.x = x; p.y = y;
+    return p.matrixTransform(svg.getScreenCTM().inverse());
+  };
+  host.addEventListener('pointerdown', e => {
+    const port = e.target.closest('[data-route-port="out"]');
+    if (!port || e.button !== 0) return;
+    e.stopImmediatePropagation(); e.preventDefault();
+    if (!state.routing.enabled || graphPreview) { setStatus('请先启用手动连接，并退出缺料预览。', true); return; }
+    const svg = host.querySelector('svg'), p = point(svg,e.clientX,e.clientY);
+    const line = document.createElementNS('http://www.w3.org/2000/svg','path');
+    line.setAttribute('stroke','#ea8300'); line.setAttribute('stroke-width','3'); line.setAttribute('fill','none'); line.setAttribute('pointer-events','none'); svg.append(line);
+    dragging = {from:port.dataset.routeNode,item:port.dataset.routeItem,p,line,id:e.pointerId};
+    host.setPointerCapture(e.pointerId);
+  }, true);
+  host.addEventListener('pointermove', e => {
+    if (!dragging || dragging.id !== e.pointerId) return;
+    e.stopImmediatePropagation(); e.preventDefault();
+    const q=point(host.querySelector('svg'),e.clientX,e.clientY), p=dragging.p;
+    dragging.line.setAttribute('d',`M${p.x} ${p.y} C${p.x+80} ${p.y} ${q.x-80} ${q.y} ${q.x} ${q.y}`);
+  }, true);
+  const finish = e => {
+    if (!dragging || dragging.id !== e.pointerId) return;
+    e.stopImmediatePropagation(); e.preventDefault();
+    const d=dragging; dragging=null; d.line.remove();
+    if (host.hasPointerCapture(e.pointerId)) host.releasePointerCapture(e.pointerId);
+    if (e.type === 'pointercancel') return;
+    const target=document.elementFromPoint(e.clientX,e.clientY)?.closest('[data-route-port="in"]');
+    if (!target || target.dataset.routeItem !== d.item || target.dataset.routeNode === d.from) { setStatus('请连接同一种物料的输入端口。', true); return; }
+    const to=target.dataset.routeNode;
+    if (state.routing.edges.some(x => x.from === d.from && x.to === to && x.item === d.item)) { setStatus('该连接已经存在。', true); return; }
+    state.routing.edges.push({from:d.from,to,item:d.item,limit:null}); renderAll();
+    setStatus('已连接 ' + (I[d.item]?.name || d.item) + '，产线已重新计算。');
+  };
+  host.addEventListener('pointerup', finish, true);
+  host.addEventListener('pointercancel', finish, true);
 }
 function renderResults() {
   const solution = planSolve(demands(), state, { mode: state.mode });
