@@ -2712,7 +2712,7 @@ html[lang="en"] .board-caption {
               <div id="balance"></div>
             </div>
             <div class="panel">
-              <div class="toolbar"><h2 style="margin: 0">05 / 机器与逐台频率</h2><label>排序 <select id="machineSort" aria-label="机器排序"><option value="milestone">按里程碑解锁</option><option value="flow">按产线上下游</option></select></label></div>
+              <div class="toolbar"><h2 style="margin: 0">05 / 机器与逐台频率</h2><button id="fillLastMachines" title="从最下游开始，把每组末台机器补满到设定频率，多出的产量加入最终产物，再往上游重新反推">末台满载 · 余量加入产物</button><label>排序 <select id="machineSort" aria-label="机器排序"><option value="milestone">按里程碑解锁</option><option value="flow">按产线上下游</option></select></label></div>
 
               <div class="tablewrap">
                 <table>
@@ -4500,9 +4500,15 @@ function sinkStatus(id) {
   return { ok: true, points: SINK_POINTS[id] ?? null };
 }
 function surplusSinkPlan(surplus, s = state) {
-  const items = Object.entries(s.surplusHandling || {})
-    .filter(([id, mode]) => mode === "sink" && (surplus[id] || 0) > 1e-5 && sinkStatus(id).ok)
-    .map(([id]) => ({ id, q: surplus[id], points: surplus[id] * (SINK_POINTS[id] || 0), known: id in SINK_POINTS }));
+  const amounts = {};
+  for (const [id, mode] of Object.entries(s.surplusHandling || {}))
+    if (mode === "sink" && (surplus[id] || 0) > 1e-5 && sinkStatus(id).ok) amounts[id] = surplus[id];
+  // Final products marked for the sink (e.g. packaged fluids) are sunk too.
+  for (const p of s.products || [])
+    if (p.sink && p.q > EPS && sinkStatus(materialId(p.id)).ok)
+      amounts[materialId(p.id)] = (amounts[materialId(p.id)] || 0) + p.q;
+  const items = Object.entries(amounts)
+    .map(([id, q]) => ({ id, q, points: q * (SINK_POINTS[id] || 0), known: id in SINK_POINTS }));
   const total = items.reduce((a, x) => a + x.q, 0);
   // Every sink takes one belt; merged belts share sinks up to the Mk.6 rate.
   const count = total > 1e-5 ? Math.ceil(total / SINK_RATE - 1e-9) : 0;
@@ -4555,15 +4561,112 @@ function variantProductItem(base, s = state) {
   }
   return null;
 }
+// Add q of item `main` made by recipe k as a final product, merging into an
+// existing card with the same material and recipe.
+function addProductOutput(main, k, q, s = state, extra = {}) {
+  const same = s.products.find((p) => materialId(p.id) === main && recipeFor(p.id, s) === k && !!p.sink === !!extra.sink);
+  if (same) {
+    same.q = cleanComputedQuantity(same.q + q);
+    return same.id;
+  }
+  const pid = recipeFor(main, s) === k && !s.products.some((p) => p.id === main) ? main : variantProductItem(main, s);
+  if (!pid) return null;
+  if (recipeFor(pid, s) !== k) s.selected[pid] = k;
+  s.products.push({ id: pid, q: cleanComputedQuantity(q), lock: false, pin: false, ...extra });
+  return pid;
+}
 function addSurplusConsumer(id, k, s = state) {
   const q = current?.surplus?.[id] || 0,
     c = surplusConsumers(id, q, s, Infinity).find((x) => x.k === k);
   if (!c || !(c.out > EPS)) return null;
-  const pid = recipeFor(c.main, s) === k ? nextProductItem(c.main, s) : variantProductItem(c.main, s);
+  const pid = addProductOutput(c.main, k, c.out, s);
+  return pid ? { pid, ...c } : null;
+}
+// Packaging route that turns a fluid into a sinkable item.
+function surplusPackaging(id, q, s = state) {
+  const k = Object.keys(R).find((r) => R[r].b === "Build_Packager_C" && !/Unpackage/.test(r) && R[r].ins[id] > 0 && (s.event || !R[r].event));
+  if (!k) return null;
+  const main = Object.keys(R[k].outs)[0];
+  if (!sinkStatus(main).ok) return null;
+  const out = (q / R[k].ins[id]) * R[k].outs[main],
+    container = Object.keys(R[k].ins).find((x) => x !== id);
+  return { k, main, out, container, containerQ: container ? (q / R[k].ins[id]) * R[k].ins[container] : 0, points: out * (SINK_POINTS[main] || 0) };
+}
+// Generators that can burn the item as fuel (water is only coolant).
+function surplusGenerators(id, q, s = state) {
+  if (id === "Desc_Water_C") return [];
+  return Object.keys(R)
+    .filter((k) => R[k].generation && R[k].ins?.[id] > 0)
+    .map((k) => {
+      const rr = rates(k, s),
+        mw = (q / rr.ins[id]) * (rr.outs.Workbench_Electricity || 0);
+      return { k, mw, others: Object.entries(rr.ins).filter(([x]) => x !== id).map(([x, v]) => [x, (q / rr.ins[id]) * v]) };
+    })
+    .filter((g) => g.mw > EPS);
+}
+function addSurplusPackaging(id, s = state) {
+  let q = current?.surplus?.[id] || 0,
+    first = null,
+    out = 0,
+    containerQ = 0;
+  // Containers can themselves create more of the fluid (canisters need
+  // plastic, which leaves residue), so repeat until the surplus is gone.
+  for (let i = 0; i < 30 && q > 1e-4; i++) {
+    const pack = surplusPackaging(id, q, s);
+    if (!pack || !(pack.out > EPS)) break;
+    if (!addProductOutput(pack.main, pack.k, pack.out, s, { sink: true })) break;
+    first ??= pack;
+    out += pack.out;
+    containerQ += pack.containerQ;
+    const plan = summarize(planSolve(demands(s), s, { mode: s.mode }), s);
+    q = plan?.surplus?.[id] || 0;
+  }
+  if (!first) return null;
+  const card = s.products.find((p) => p.sink && materialId(p.id) === first.main && recipeFor(p.id, s) === first.k);
+  if (card) card.q = Math.round(card.q * 1000) / 1000;
+  return { ...first, pid: card?.id, out, containerQ, points: out * (SINK_POINTS[first.main] || 0) };
+}
+function addSurplusGenerator(id, k, s = state) {
+  const g = surplusGenerators(id, current?.surplus?.[id] || 0, s).find((x) => x.k === k);
+  if (!g) return null;
+  const pid = nextPowerItem(s);
   if (!pid) return null;
-  if (recipeFor(pid, s) !== k) s.selected[pid] = k;
-  s.products.push({ id: pid, q: cleanComputedQuantity(c.out), lock: false, pin: false });
-  return { pid, ...c };
+  ensureProductItem(pid);
+  s.selected[pid] = k;
+  s.products.push({ id: pid, q: cleanComputedQuantity(g.mw), lock: false, pin: false });
+  return { pid, ...g };
+}
+// Reverse planning: run every last machine at full clock, working from the
+// most downstream recipe upstream, and add the extra output as products.
+function fillLastMachines(s = state) {
+  if (s.mode !== "reverse") return { ok: false, reason: "仅在“从产物反推”模式下可用。" };
+  const added = [];
+  for (let step = 0; step < 200; step++) {
+    const solution = planSolve(demands(s), s, { mode: "reverse" }),
+      plan = summarize(solution, s);
+    if (!plan) return { ok: false, reason: "方案不可行，已停止。", added };
+    const order = machineDisplayOrder(plan.rows, { ...s, machineSort: "flow" }, plan);
+    const partial = order
+      .filter((row) => {
+        const r = R[row.k];
+        if (r.generation || machineGroup(row.k, s)) return false;
+        const main = Object.keys(r.outs)[0];
+        if (!I[main]?.selectable || I[main].handOnly || isPowerItem(main)) return false;
+        const target = Math.ceil(row.eq / row.cap - 1e-6) * row.cap;
+        return target - row.eq > 1e-6 * Math.max(1, row.cap);
+      })
+      .pop();
+    if (!partial) return { ok: true, added };
+    const main = Object.keys(R[partial.k].outs)[0],
+      target = Math.ceil(partial.eq / partial.cap - 1e-6) * partial.cap,
+      q = (target - partial.eq) * rates(partial.k, s).outs[main];
+    const recipe = recipeBase(partial.k),
+      existing = s.products.find((p) => materialId(p.id) === main && recipeFor(p.id, s) === recipe);
+    const pid = existing ? ((existing.q = cleanComputedQuantity(existing.q + q)), existing.id) : addProductOutput(main, recipe, q, s);
+    if (!pid) return { ok: false, reason: "无法添加产物。", added };
+    added.push({ id: main, recipe: partial.k, q });
+  }
+  return { ok: false, reason: "迭代次数过多，已停止。", added };
 }
 function addSurplusAsProduct(id, s = state) {
   const q = current?.surplus?.[id] || 0;
@@ -4756,8 +4859,13 @@ function renderSurplusHandling(p) {
     const status = sinkStatus(id),
       mode = status.ok && state.surplusHandling[id] === "sink" ? "sink" : "export",
       points = status.ok && status.points != null ? fmt(q * status.points) : "—",
-      ideas = surplusConsumers(id, q);
-    const handling = `<select data-surplus-mode="${esc(id)}" aria-label="${esc(I[id]?.name || id)}处理方式"><option value="export"${mode === "export" ? " selected" : ""}>待处理 / 外送</option><option value="sink"${mode === "sink" ? " selected" : ""}${status.ok ? "" : " disabled"}>送入AWESOME回收站</option></select>${status.ok ? "" : `<div class="small">${esc(status.reason)}</div>`}${I[id]?.selectable && !I[id].handOnly ? `<div class="buttons" style="margin-top:6px"><button data-surplus-product="${esc(id)}">设为最终产物</button></div>` : ""}`;
+      ideas = surplusConsumers(id, q),
+      pack = I[id]?.fluid ? surplusPackaging(id, q) : null,
+      generators = surplusGenerators(id, q);
+    const fluidNote = I[id]?.fluid
+      ? `<div class="small fluid-note">流体：${state.strict ? "已开启“禁止多余流体外送”，需在下游消纳或封装。" : "外送需管道或流体储罐；也可封装成桶装件运输或回收。"}</div>`
+      : "";
+    const handling = `<select data-surplus-mode="${esc(id)}" aria-label="${esc(I[id]?.name || id)}处理方式"><option value="export"${mode === "export" ? " selected" : ""}>待处理 / 外送</option><option value="sink"${mode === "sink" ? " selected" : ""}${status.ok ? "" : " disabled"}>送入AWESOME回收站</option></select>${status.ok || I[id]?.fluid ? "" : `<div class="small">${esc(status.reason)}</div>`}${fluidNote}<div class="buttons" style="margin-top:6px">${I[id]?.selectable && !I[id].handOnly ? `<button data-surplus-product="${esc(id)}">设为最终产物</button>` : ""}${pack ? `<button data-surplus-pack="${esc(id)}" title="${esc(R[pack.k].name)}：至少 ${fmt(pack.out)} 件/分，另需${esc(I[pack.container]?.name || "")}；制造容器若再产生该流体，会一并封装">封装成${esc(I[pack.main]?.name || pack.main)}送回收站</button>` : ""}${generators.map((g) => `<button data-surplus-gen="${esc(id)}" data-surplus-recipe="${esc(g.k)}" title="${g.others.length ? "另需 " + g.others.map(([x, v]) => (I[x]?.name || x) + " " + fmt(v)).join("、") : ""}">送入${esc(B[R[g.k].b]?.name || R[g.k].name)} · ${fmt(g.mw)} MW</button>`).join("")}</div>`;
     const consumers = ideas.length
       ? ideas.map((c) => `<div class="surplus-idea"><div><b>${esc(R[c.k].name)}</b>${R[c.k].alt ? " [替代]" : ""} → ${esc(I[c.main]?.name || c.main)} 约 <b>${fmt(c.out)}</b> ${unit(c.main)}${c.others.length ? `<div class="small">另需 ${c.others.map(([x, v]) => esc(I[x]?.name || x) + " " + fmt(v)).join("、")}</div>` : ""}</div><button data-surplus-use="${esc(id)}" data-surplus-recipe="${esc(c.k)}">按剩余量添加产物</button></div>`).join("")
       : '<span class="small">没有可用的下游配方</span>';
@@ -4776,8 +4884,20 @@ function initSurplusHandling() {
   });
   $("surplus").addEventListener("click", (e) => {
     const use = e.target.closest("[data-surplus-use]"),
-      product = e.target.closest("[data-surplus-product]");
-    if (use) {
+      product = e.target.closest("[data-surplus-product]"),
+      pack = e.target.closest("[data-surplus-pack]"),
+      gen = e.target.closest("[data-surplus-gen]");
+    if (pack) {
+      const added = addSurplusPackaging(pack.dataset.surplusPack);
+      if (!added) return setStatus("该流体没有可回收的封装配方。", true);
+      renderAll();
+      setStatus(`已添加 ${I[added.main]?.name || added.main} ${fmt(added.out)} 件/分并送入回收站（需${I[added.container]?.name || "容器"} ${fmt(added.containerQ)}）。`, !current);
+    } else if (gen) {
+      const added = addSurplusGenerator(gen.dataset.surplusGen, gen.dataset.surplusRecipe);
+      if (!added) return setStatus("无法添加发电目标。", true);
+      renderAll();
+      setStatus(`已添加发电目标 ${fmt(added.mw)} MW（${R[added.k].name}）。`, !current);
+    } else if (use) {
       const added = addSurplusConsumer(use.dataset.surplusUse, use.dataset.surplusRecipe);
       if (!added) return setStatus("无法添加该下游产物。", true);
       renderAll();
@@ -9862,7 +9982,7 @@ function safeState(x) {
   const seen = new Set();
   s.products = (x.products || [])
     .filter((p) => I[p.id]?.selectable && !seen.has(p.id) && seen.add(p.id))
-    .map((p) => ({ id: p.id, q: amount(p.q), lock: !!p.lock, pin: !!p.pin }));
+    .map((p) => ({ id: p.id, q: amount(p.q), lock: !!p.lock, pin: !!p.pin, ...(p.sink && sinkStatus(materialId(p.id)).ok ? { sink: true } : {}) }));
   const supplySeen = new Set();
   s.supplies = (x.supplies || [])
     .filter(
@@ -10075,6 +10195,7 @@ function controls() {
   for (const k of ["over", "strict", "event", "autoPin"])
     $(k).checked = state[k];
   if ($("machineSort")) $("machineSort").value = state.machineSort;
+  if ($("fillLastMachines")) $("fillLastMachines").hidden = state.mode !== "reverse";
   for (const k of ["mode", "sort", "clockNum", "powerMult"])
     $(k).value = ["mode", "sort"].includes(k) ? state[k] : displayNumber(state[k === "clockNum" ? "clock" : k]);
   $("clock").max = $("clockNum").max = state.over ? 250 : 100;
@@ -10147,7 +10268,7 @@ function renderProducts() {
     productOrder()
       .map(
         (p) =>
-          `<div class="card${p.q > EPS ? " active" : ""}${p.lock ? " locked" : ""}" id="product-${p.id}"><div class="top"><div class="itemhead">${icon(p.id)}<div><h3>${esc(productTitle(p.id))}</h3><small>${esc(I[p.id].en)}</small></div></div><div class="actions"><button data-pin="${p.id}" class="${p.pin ? "pinon" : ""}" aria-pressed="${p.pin}">${p.pin ? "已置顶" : "置顶"}</button><button data-lock="${p.id}" aria-pressed="${p.lock}">${p.lock ? "已锁定" : "锁定"}</button><button data-duplicate-product="${p.id}" title="添加同物品的独立产物卡片">＋</button><button data-delproduct="${p.id}" aria-label="删除产物">×</button></div></div>${isPowerItem(p.id) ? '' : ""}${recipeSelect(p.id)}<div class="amountline"><input type="number" min="0" max="100000000" step="any" data-quantity="${p.id}" value="${displayNumber(+p.q.toFixed(3))}" ${p.lock ? "disabled" : ""} aria-label="${esc(I[p.id].name)}产量"><small>${unit(p.id)}</small><button data-maxproduct="${p.id}" ${p.lock ? "disabled" : ""}>${state.mode === "reverse" ? "反推此产量" : isPowerItem(p.id) ? "剩余资源优先发电" : "优先分配"}</button></div><input type="range" min="0" max="${Math.max(100, Math.ceil(p.q * 1.5))}" step="1" value="${Math.round(p.q)}" data-slider="${p.id}" ${p.lock ? "disabled" : ""} aria-label="${esc(I[p.id].name)}整数产量滑条"><div id="single-${p.id}" class="small"></div><div id="cap-${p.id}" class="small"></div></div>`,
+          `<div class="card${p.q > EPS ? " active" : ""}${p.lock ? " locked" : ""}" id="product-${p.id}"><div class="top"><div class="itemhead">${icon(p.id)}<div><h3>${esc(productTitle(p.id))}</h3><small>${esc(I[p.id].en)}</small></div></div><div class="actions"><button data-pin="${p.id}" class="${p.pin ? "pinon" : ""}" aria-pressed="${p.pin}">${p.pin ? "已置顶" : "置顶"}</button><button data-lock="${p.id}" aria-pressed="${p.lock}">${p.lock ? "已锁定" : "锁定"}</button>${!isPowerItem(p.id) && sinkStatus(materialId(p.id)).ok ? `<button data-product-sink="${p.id}" aria-pressed="${!!p.sink}" title="把该产物送入AWESOME回收站，计入回收站耗电与积分">${p.sink ? "回收站✓" : "回收站"}</button>` : ""}<button data-duplicate-product="${p.id}" title="添加同物品的独立产物卡片">＋</button><button data-delproduct="${p.id}" aria-label="删除产物">×</button></div></div>${isPowerItem(p.id) ? '' : ""}${recipeSelect(p.id)}<div class="amountline"><input type="number" min="0" max="100000000" step="any" data-quantity="${p.id}" value="${displayNumber(+p.q.toFixed(3))}" ${p.lock ? "disabled" : ""} aria-label="${esc(I[p.id].name)}产量"><small>${unit(p.id)}</small><button data-maxproduct="${p.id}" ${p.lock ? "disabled" : ""}>${state.mode === "reverse" ? "反推此产量" : isPowerItem(p.id) ? "剩余资源优先发电" : "优先分配"}</button></div><input type="range" min="0" max="${Math.max(100, Math.ceil(p.q * 1.5))}" step="1" value="${Math.round(p.q)}" data-slider="${p.id}" ${p.lock ? "disabled" : ""} aria-label="${esc(I[p.id].name)}整数产量滑条"><div id="single-${p.id}" class="small"></div><div id="cap-${p.id}" class="small"></div></div>`,
       )
       .join("") ||
     '<div class="empty">尚未添加产物。搜索添加你想生产的物品。</div>';
@@ -10393,7 +10514,7 @@ function renderResults() {
             (p) =>
               recipeFor(p.id) === recipeBase(row.k) && R[row.k].outs[materialId(p.id)] > 0,
           )?.id || Object.keys(R[row.k].outs)[0];
-        return `<tr id="machine-${row.k}" class="${machineIsBuilt(row) ? "machine-built" : ""}"><td class="wrap"><div class="itemhead">${icon(R[row.k].b)}<div>${esc(B[R[row.k].b]?.name)}<br><small>${esc(R[row.k].name)}</small>${row.unlock ? `<div class="small machine-unlock">机器解锁：T${row.unlock.tier} · ${esc(row.unlock.name)}</div>` : ""}${row.flowCycle ? '<div class="badge">循环回流</div>' : ""}${machineIsBuilt(row) ? '<div class="badge" style="margin-top:6px">✓ 已建成</div>' : ""}</div></div>${recipeSelect(main, "recipe-choice")}</td><td class="wrap machine-materials"><div class="machine-material-label">输入材料 · 本组总需求</div>${machineInputsCell(row)}<div class="machine-material-label machine-output-label">输出产物</div>${machineOutputsCell(row)}</td><td class="wrap">${machineLabel(row)}<div class="small" style="margin-top:8px"><b>末台${row.duty < 0.999999 ? "平均" : ""}产出：</b>${esc(lastMachineOutputText(row))}</div>${machineClockControl(row)}${sloopControl(row)}</td><td>${row.shards}</td><td>${R[row.k].generation ? "发电 " + fmt(row.outs.Workbench_Electricity || 0) + " MW" : fmt(row.power) + " / " + fmt(row.peak)}</td>${machineBuildCells(row)}</tr>`;
+        return `<tr id="machine-${row.k}" class="${machineIsBuilt(row) ? "machine-built" : ""}"><td class="wrap"><div class="itemhead">${icon(R[row.k].b)}<div>${esc(B[R[row.k].b]?.name)}<br><small>${esc(R[row.k].name)}</small>${row.flowCycle ? '<div class="badge">循环回流</div>' : ""}${machineIsBuilt(row) ? '<div class="badge" style="margin-top:6px">✓ 已建成</div>' : ""}</div></div>${recipeSelect(main, "recipe-choice")}</td><td class="wrap machine-materials"><div class="machine-material-label">输入材料 · 本组总需求</div>${machineInputsCell(row)}<div class="machine-material-label machine-output-label">输出产物</div>${machineOutputsCell(row)}</td><td class="wrap">${machineLabel(row)}<div class="small" style="margin-top:8px"><b>末台${row.duty < 0.999999 ? "平均" : ""}产出：</b>${esc(lastMachineOutputText(row))}</div>${machineClockControl(row)}${sloopControl(row)}</td><td>${row.shards}</td><td>${R[row.k].generation ? "发电 " + fmt(row.outs.Workbench_Electricity || 0) + " MW" : fmt(row.power) + " / " + fmt(row.peak)}</td>${machineBuildCells(row)}</tr>`;
       })
       .join("") || '<tr><td colspan="7">暂无生产机器。</td></tr>';
   renderSurplusHandling(p);
@@ -10824,6 +10945,14 @@ function init() {
       renderProducts();
       save();
     }
+    if (d.productSink) {
+      const p = state.products.find((x) => x.id === d.productSink);
+      if (p) {
+        if (p.sink) delete p.sink;
+        else p.sink = true;
+        renderAll();
+      }
+    }
     if (d.lock) {
       const p = state.products.find((x) => x.id === d.lock);
       p.lock = !p.lock;
@@ -11011,6 +11140,12 @@ function init() {
   $("powerMult").onchange = (e) => {
     state.powerMult = normalizeMultiplier(e.target.value);
     renderAll();
+  };
+  $("fillLastMachines").onclick = () => {
+    const r = fillLastMachines();
+    renderAll();
+    if (!r.ok) return setStatus(r.reason, true);
+    setStatus(r.added.length ? `末台已全部满载：${r.added.length} 处余量加入产物（${[...new Set(r.added.map((x) => I[x.id]?.name || x.id))].join("、")}），已从下游往上游重新反推。` : "所有末台已满载，无需调整。");
   };
   $("machineSort").value = state.machineSort;
   $("machineSort").onchange = (e) => {
