@@ -556,20 +556,24 @@ function planSolve(
   const externals = new Set(Object.keys(pool));
   if (s.mode === "constrained" && mode !== "forward")
     externals.add(s.inputConstraint.id);
+  // Raw resources can only be extracted, so in reverse-style planning they
+  // stay external even when the same resource is also a final product.
   if (mode !== "forward")
     for (const id of involved)
       if (
-        !hasProductMaterial(id, s) &&
+        (!hasProductMaterial(id, s) || I[id]?.raw) &&
         (I[id]?.raw ||
           !recipeFor(id, s) ||
           s.supplies.some((x) => x.id === id && x.stop))
       )
         externals.add(id);
   for (const id of externals) {
-    if (hasProductMaterial(id, s) && !(I[id]?.raw && s.supplies.some(p => p.id === id))) continue;
+    if (hasProductMaterial(id, s) && !(I[id]?.raw && (mode !== "forward" || s.supplies.some(p => p.id === id)))) continue;
     // A non-boundary supply is a finite contribution: use it first, then
     // manufacture any remaining demand, including in reverse planning.
-    const partial = s.supplies.some(x => x.id === id && !x.stop);
+    // Raw resources cannot be manufactured, so their supply is never a cap
+    // outside forward planning.
+    const partial = !I[id]?.raw && s.supplies.some(x => x.id === id && !x.stop);
     const v = { objective: target || flex || partial ? 0 : 1, [id]: 1 };
     if (mode === "forward" || (cap && id === cap.id) || (partial && mode !== "shortage")) {
       model.constraints["s:" + id] = {
@@ -6294,12 +6298,18 @@ function renderRouting() {
     el.innerHTML = choices.map(([v, label]) => `<option value="${esc(v)}">${esc(label)}</option>`).join('');
     if (choices.some(([v]) => v === previous)) el.value = previous;
   };
-  select('routingFrom', nodes.filter(n => n.type !== 'product').map(n => [n.id,n.label]));
-  select('routingTo', nodes.filter(n => n.type !== 'external').map(n => [n.id,n.label]));
-  const from = $('routingFrom').value, to = $('routingTo').value;
-  const produced = from.startsWith('e:') ? [from.slice(2)] : Object.keys(R[from]?.outs || {});
-  const accepted = to.startsWith('p:') ? [materialId(to.slice(2))] : Object.keys(R[to]?.ins || {});
-  select('routingItem', produced.filter(id => accepted.includes(id)).map(id => [id,I[id]?.name || id]));
+  const produced = id => id.startsWith('e:') ? [id.slice(2)] : Object.keys(R[id]?.outs || {});
+  const accepted = id => id.startsWith('p:') ? [materialId(id.slice(2))] : Object.keys(R[id]?.ins || {});
+  const compatible = (from, to) => from !== to ? produced(from).filter(id => accepted(to).includes(id)) : [];
+  // Only offer destinations that can receive something from the chosen
+  // source, so the material list is never left empty by an incompatible pair.
+  const sources = nodes.filter(n => n.type !== 'product' && nodes.some(t => t.type !== 'external' && compatible(n.id, t.id).length));
+  select('routingFrom', sources.map(n => [n.id,n.label]));
+  const from = $('routingFrom').value;
+  select('routingTo', nodes.filter(n => n.type !== 'external' && compatible(from, n.id).length).map(n => [n.id,n.label]));
+  const to = $('routingTo').value;
+  select('routingItem', compatible(from, to).map(id => [id,I[id]?.name || id]));
+  $('routingAdd').disabled = !from || !to || !$('routingItem').value;
   const labels = new Map(nodes.map(n => [n.id,n.label]));
   $('routingList').innerHTML = routing.edges.length ? `<div class="tablewrap"><table><thead><tr><th>来源</th><th>物料</th><th>去向</th><th>上限 / 分</th><th>实际 / 分</th><th></th></tr></thead><tbody>${routing.edges.map((e,i) => `<tr><td>${esc(labels.get(e.from) || e.from)}</td><td>${esc(I[e.item]?.name || e.item)}</td><td>${esc(labels.get(e.to) || e.to)}</td><td>${e.limit == null ? '不限' : fmt(e.limit)}</td><td>${current ? fmt(current.routedEdges?.find(x => x.from === e.from && x.to === e.to && x.item === e.item)?.q || 0) : '—'}</td><td><button data-routing-remove="${i}">删除</button></td></tr>`).join('')}</tbody></table></div>` : '<p>尚无连接。</p>';
 }
