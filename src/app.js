@@ -968,6 +968,7 @@ function reuseAndStartup(plan, s = state) {
         toTarget: 0,
         surplus: 0,
         sources: new Set(),
+        consumers: new Map(),
       };
       entry.produced += q;
       entry.sources.add(row.k);
@@ -976,7 +977,10 @@ function reuseAndStartup(plan, s = state) {
   for (const e of graph.edges) {
     const entry = items.get(e.item);
     if (!entry || !entry.sources.has(e.from)) continue;
-    if (recipeIds.has(e.to)) entry.reused += e.q;
+    if (recipeIds.has(e.to)) {
+      entry.reused += e.q;
+      entry.consumers.set(e.to, (entry.consumers.get(e.to) || 0) + e.q);
+    }
     else if (e.to.startsWith("p:")) entry.toTarget += e.q;
     else if (e.to.startsWith("w:")) entry.surplus += e.q;
   }
@@ -997,6 +1001,8 @@ function reuseAndStartup(plan, s = state) {
         steady,
         startup,
         additional: Math.max(0, startup - steady),
+        rate: entry.produced > EPS ? Math.min(1, entry.reused / entry.produced) : 0,
+        consumers: [...entry.consumers].sort((a, b) => b[1] - a[1]),
       };
     })
     .sort(
@@ -1055,12 +1061,82 @@ function initSurplusHandling() {
     }
   });
 }
+// Recipe loops (strongly connected components of the flow graph): what
+// circulates inside, what enters and leaves, and the cheapest place to prime.
+function recycleLoops(plan = current, s = state) {
+  if (!plan) return [];
+  const g = flowGraph(plan, s);
+  return constructionStages(plan, s)
+    .filter((stage) => stage.cycle)
+    .map((stage) => {
+      const inside = new Set(stage.keys),
+        internal = {},
+        inputs = {},
+        outputs = {},
+        links = [];
+      const add = (map, id, q) => (map[id] = (map[id] || 0) + q);
+      for (const e of g.edges) {
+        const a = inside.has(e.from),
+          b = inside.has(e.to);
+        if (a && b) {
+          add(internal, e.item, e.q);
+          links.push(e);
+        } else if (b) add(inputs, e.item, e.q);
+        else if (a) add(outputs, e.item, e.q);
+      }
+      // A single item is a valid priming point when removing its in-loop
+      // links leaves the loop acyclic.
+      const acyclicWithout = (item) => {
+        const adj = new Map(stage.keys.map((k) => [k, []]));
+        for (const e of links) if (e.item !== item) adj.get(e.from).push(e.to);
+        const state = new Map();
+        const visit = (k) => {
+          if (state.get(k) === 1) return false;
+          if (state.get(k) === 2) return true;
+          state.set(k, 1);
+          for (const n of adj.get(k)) if (!visit(n)) return false;
+          state.set(k, 2);
+          return true;
+        };
+        return stage.keys.every(visit);
+      };
+      const prime = Object.entries(internal)
+        .filter(([id]) => acyclicWithout(id))
+        .sort((a, b) => a[1] - b[1])[0];
+      return {
+        keys: stage.keys,
+        internal,
+        inputs,
+        outputs,
+        prime: prime ? { id: prime[0], q: prime[1] } : null,
+      };
+    });
+}
 function renderReuseAndStartup(plan) {
-  const rows = reuseAndStartup(plan);
+  const rows = reuseAndStartup(plan),
+    name = (k) => esc(R[k]?.name || k),
+    list = (map) =>
+      Object.entries(map)
+        .filter(([, q]) => q > 1e-5)
+        .sort((a, b) => b[1] - a[1])
+        .map(([id, q]) => `${esc(I[id]?.name || id)} <b>${fmt(q)}</b> ${unit(id)}`)
+        .join("<br>") || "—";
   const table = rows.length
-    ? `<div class="tablewrap"><table><thead><tr><th>副产物</th><th>产生 / 分</th><th>内部回用 / 分</th><th>最终产物 / 分</th><th>待处理 / 分</th><th>启动供给能力 / 分</th><th>稳态外供 / 分</th><th>回用后可减少 / 分</th></tr></thead><tbody>${rows.map((r) => `<tr><td>${esc(I[r.id]?.name || r.id)}<small> ${unit(r.id)}</small>${r.steady < EPS && r.additional > EPS ? '<div class="badge">需预充或临时外供</div>' : ""}</td><td>${fmt(r.produced)}</td><td>${fmt(r.reused)}</td><td>${fmt(r.toTarget)}</td><td>${fmt(r.surplus)}</td><td><b>${fmt(r.startup)}</b></td><td>${fmt(r.steady)}</td><td>${fmt(r.additional)}</td></tr>`).join("")}</tbody></table></div>`
+    ? `<div class="tablewrap"><table><thead><tr><th>副产物</th><th>产生 / 分</th><th>内部回用 / 分</th><th>回用率</th><th>回用去向</th><th>最终产物 / 分</th><th>待处理 / 分</th><th>启动供给能力 / 分</th><th>稳态外供 / 分</th><th>回用后可减少 / 分</th></tr></thead><tbody>${rows.map((r) => `<tr><td>${esc(I[r.id]?.name || r.id)}<small> ${unit(r.id)}</small>${r.steady < EPS && r.additional > EPS ? '<div class="badge">需预充或临时外供</div>' : ""}</td><td>${fmt(r.produced)}</td><td>${fmt(r.reused)}</td><td>${fmt(r.rate * 100)}%</td><td class="wrap small">${r.consumers.map(([k, q]) => `${name(k)} ${fmt(q)}`).join("<br>") || "—"}</td><td>${fmt(r.toTarget)}</td><td>${fmt(r.surplus)}</td><td><b>${fmt(r.startup)}</b></td><td>${fmt(r.steady)}</td><td>${fmt(r.additional)}</td></tr>`).join("")}</tbody></table></div>`
     : '<p class="small">当前方案没有产生需要回用的副产物。</p>';
-  $("processBalance").innerHTML = table;
+  const loops = recycleLoops(plan);
+  const loopCards = loops.length
+    ? `<h3 style="margin:16px 0 8px">回流环路</h3><div class="recycle-loops">${loops
+        .map(
+          (l, i) => `<div class="recycle-loop"><b>环路 ${i + 1}</b>：${l.keys.map(name).join(" ⇄ ")}<div class="recycle-grid"><div><span class="small">环内循环 / 分</span><br>${list(l.internal)}</div><div><span class="small">环外输入 / 分</span><br>${list(l.inputs)}</div><div><span class="small">环外输出 / 分</span><br>${list(l.outputs)}</div></div><p class="small">${
+            l.prime
+              ? `启动：在 <b>${esc(I[l.prime.id]?.name || l.prime.id)}</b> 回流处临时外供 <b>${fmt(l.prime.q)}</b> ${unit(l.prime.id)} 即可带动整个环路；回流稳定到达后撤除。`
+              : "启动：该环路由多种物料交叉回流，需在每条回流线上各自预充或临时外供。"
+          } 建议在回流线上设置储物箱或流体储罐作缓冲，避免下游短时停机导致整环停转。</p></div>`,
+        )
+        .join("")}</div>`
+    : "";
+  $("processBalance").innerHTML = table + loopCards;
 }
 
 function flowGraph(plan, s = state) {
