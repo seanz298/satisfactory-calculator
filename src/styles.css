@@ -2448,3 +2448,15 @@ html[lang="en"] .board-caption {
 .optimizer-panel [hidden],#settingsGeneralPage[hidden],#settingsAlternatesPage[hidden]{display:none!important}
 #optimizationPlanSummary{margin-bottom:20px}
 @media(max-width:540px){.optimizer-fields,.owned-alternates-list{grid-template-columns:minmax(0,1fr)}.optimizer-actions>*{flex:1 1 auto}}
+
+/* Surplus handling */
+#surplus td.wrap { text-align: left; }
+.surplus-idea { display: flex; gap: 10px; align-items: center; justify-content: space-between; padding: 6px 0; border-bottom: 1px dashed #e4eaf0; }
+.surplus-idea:last-child { border-bottom: 0; }
+.surplus-idea button { flex: none; white-space: nowrap; }
+
+/* Recycle loops */
+.recycle-loops { display: grid; gap: 10px; }
+.recycle-loop { border: 1px solid #e4eaf0; border-radius: 10px; padding: 12px 14px; background: #fbfcfd; }
+.recycle-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 8px; }
+@media (max-width: 720px) { .recycle-grid { grid-template-columns: 1fr; } }

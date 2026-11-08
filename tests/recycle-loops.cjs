@@ -1,0 +1,24 @@
+const assert = require('node:assert/strict');
+const vm = require('node:vm');
+const {environment} = require('./integration.cjs');
+const c = environment();
+const r = JSON.parse(JSON.stringify(vm.runInContext(`(()=>{
+ const s=fresh(); s.mode='reverse'; s.products=[{id:'Desc_Plastic_C',q:300,lock:true}];
+ s.selected={Desc_Plastic_C:'Recipe_Alternate_Plastic_1_C',Desc_Rubber_C:'Recipe_Alternate_RecycledRubber_C',Desc_LiquidFuel_C:'Recipe_Alternate_DilutedFuel_C'};
+ const p=summarize(planSolve(demands(s),s),s);
+ const a=fresh(); a.mode='reverse'; a.products=[{id:'Desc_AluminumIngot_C',q:60,lock:true}];
+ const pa=summarize(planSolve(demands(a),a),a);
+ const iron=fresh(); iron.mode='reverse'; iron.products=[{id:'Desc_IronPlate_C',q:60,lock:true}];
+ const pi=summarize(planSolve(demands(iron),iron),iron);
+ return {loops:recycleLoops(p,s), al:recycleLoops(pa,a), water:reuseAndStartup(pa,a).find(x=>x.id==='Desc_Water_C'), none:recycleLoops(pi,iron).length};
+})()`, c)));
+const [plastic] = r.loops;
+assert.equal(r.loops.length, 1);
+assert.deepEqual([...plastic.keys].sort(), ['Recipe_Alternate_Plastic_1_C','Recipe_Alternate_RecycledRubber_C']);
+assert.ok(Math.abs(plastic.internal.Desc_Rubber_C - 200) < 1e-6 && Math.abs(plastic.internal.Desc_Plastic_C - 100) < 1e-6);
+assert.ok(Math.abs(plastic.outputs.Desc_Plastic_C - 300) < 1e-6 && plastic.inputs.Desc_LiquidFuel_C > 0);
+assert.equal(plastic.prime.id, 'Desc_Plastic_C'); assert.ok(Math.abs(plastic.prime.q - 100) < 1e-6);
+assert.equal(r.al.length, 1); assert.equal(r.al[0].prime.id, 'Desc_Water_C');
+assert.equal(r.water.rate, 1); assert.equal(r.water.consumers[0][0], 'Recipe_AluminaSolution_C');
+assert.equal(r.none, 0);
+console.log('Recycle loops, priming point and reuse destinations PASS');

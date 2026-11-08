@@ -1,0 +1,21 @@
+const assert = require('node:assert/strict');
+const vm = require('node:vm');
+const {environment} = require('./integration.cjs');
+const c = environment();
+const r = JSON.parse(JSON.stringify(vm.runInContext(`(()=>{
+ const s=fresh(); s.mode='reverse'; s.products=[{id:'Desc_ComputerSuper_C',q:2,lock:true}];
+ const p=summarize(planSolve(demands(s),s),s);
+ const order=machineDisplayOrder(p.rows,s,p).map(r=>[r.k,R[r.k].b,r.unlock?.tier,r.unlock?.order]);
+ s.machineSort='flow'; const flow=machineDisplayOrder(p.rows,s,p).map(r=>r.k);
+ const round=safeState(JSON.parse(JSON.stringify(s))).machineSort, def=safeState(JSON.parse(JSON.stringify({...fresh(),machineSort:'x'}))).machineSort;
+ const missing=[...new Set(Object.values(R).filter(x=>x.kind==='machine').map(x=>x.b))].filter(b=>!BUILDING_UNLOCK[b]||!PROGRESSION.milestones.some(m=>m.id===BUILDING_UNLOCK[b]));
+ return {order,flow,round,def,missing,fresh:fresh().machineSort};
+})()`, c)));
+const keys = r.order.map(([, , t, o]) => t * 100 + o);
+assert.deepEqual(keys, [...keys].sort((a, b) => a - b), 'rows ascend by milestone');
+assert.equal(r.order[0][1], 'Build_SmelterMk1_C');
+assert.equal(r.order.at(-1)[1], 'Build_ManufacturerMk1_C');
+assert.equal(r.flow.length, r.order.length);
+assert.equal(r.round, 'flow'); assert.equal(r.def, 'milestone'); assert.equal(r.fresh, 'milestone');
+assert.deepEqual(r.missing, []);
+console.log('Machine table ordered by milestone unlock, flow order optional PASS');

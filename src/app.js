@@ -27,12 +27,39 @@ const DEFAULTS = Object.fromEntries(
     return [k, I[k].raw ? "" : options[0] || ""];
   }),
 );
+// AWESOME Sink points per item, taken from the bundled optimizer tables.
+const SINK_POINTS = (() => {
+  const map = {};
+  for (const c of globalThis.__factoryBundle.optimization?.normal?.columns || [])
+    if (c.type_ === "sink" && c.coeffs?.points > 0) map[c.name] = c.coeffs.points;
+  return map;
+})();
+const SINK_RATE = 1200, SINK_POWER = 30;
+const NON_SINKABLE = new Set(["Desc_NuclearWaste_C", "Desc_PlutoniumWaste_C"]);
+// Milestone that unlocks each production building (Satisfactory 1.x).
+const BUILDING_UNLOCK = {
+  Build_SmelterMk1_C: "Schematic_Tutorial1_5_C",
+  Build_ConstructorMk1_C: "Schematic_Tutorial2_C",
+  Build_AssemblerMk1_C: "Schematic_2-1_C",
+  Build_GeneratorCoal_C: "Schematic_3-1_C",
+  Build_FoundryMk1_C: "Schematic_3-4_C",
+  Build_OilRefinery_C: "Schematic_5-1_C",
+  Build_Packager_C: "Schematic_5-4_C",
+  Build_GeneratorFuel_C: "Schematic_5-5_C",
+  Build_ManufacturerMk1_C: "Schematic_5-2_C",
+  Build_Blender_C: "Schematic_7-1_C",
+  Build_GeneratorNuclear_C: "Schematic_8-1_C",
+  Build_HadronCollider_C: "Schematic_8-5_C",
+  Build_Converter_C: "Schematic_9-1_C",
+  Build_QuantumEncoder_C: "Schematic_9-2_C",
+};
 function fresh() {
   return {
     version: 12,
     supplies: [],
     products: [],
     routing: { enabled: false, edges: [] },
+    surplusHandling: {},
     nodes: [],
     selected: {},
     clock: 100,
@@ -40,6 +67,7 @@ function fresh() {
     strict: false,
     autoPin: true,
     sort: "desc",
+    machineSort: "milestone",
     powerMult: 1,
     generationMult: 1,
     costMult: 1,
@@ -556,20 +584,24 @@ function planSolve(
   const externals = new Set(Object.keys(pool));
   if (s.mode === "constrained" && mode !== "forward")
     externals.add(s.inputConstraint.id);
+  // Raw resources can only be extracted, so in reverse-style planning they
+  // stay external even when the same resource is also a final product.
   if (mode !== "forward")
     for (const id of involved)
       if (
-        !hasProductMaterial(id, s) &&
+        (!hasProductMaterial(id, s) || I[id]?.raw) &&
         (I[id]?.raw ||
           !recipeFor(id, s) ||
           s.supplies.some((x) => x.id === id && x.stop))
       )
         externals.add(id);
   for (const id of externals) {
-    if (hasProductMaterial(id, s) && !(I[id]?.raw && s.supplies.some(p => p.id === id))) continue;
+    if (hasProductMaterial(id, s) && !(I[id]?.raw && (mode !== "forward" || s.supplies.some(p => p.id === id)))) continue;
     // A non-boundary supply is a finite contribution: use it first, then
     // manufacture any remaining demand, including in reverse planning.
-    const partial = s.supplies.some(x => x.id === id && !x.stop);
+    // Raw resources cannot be manufactured, so their supply is never a cap
+    // outside forward planning.
+    const partial = !I[id]?.raw && s.supplies.some(x => x.id === id && !x.stop);
     const v = { objective: target || flex || partial ? 0 : 1, [id]: 1 };
     if (mode === "forward" || (cap && id === cap.id) || (partial && mode !== "shortage")) {
       model.constraints["s:" + id] = {
@@ -728,17 +760,20 @@ function summarize(solution, s = state) {
     );
   const mining =
     s.nodes.reduce((a, n) => a + nodeOutput(n).power, 0) * s.powerMult;
+  const sink = surplusSinkPlan(surplus, s);
   return {
     rows,
+    sink,
     routedEdges: solution.routedEdges,
     external,
     surplus,
     input,
     output,
-    power: power + mining,
+    power: power + mining + sink.power,
     productionPower: power,
     miningPower: mining,
-    peak: peak + mining,
+    sinkPower: sink.power,
+    peak: peak + mining + sink.power,
     machines,
     shards,
     sloopTotal: rows.reduce((n, r) => n + (r.sloopTotal || 0), 0),
@@ -747,6 +782,188 @@ function summarize(solution, s = state) {
     importedPower: supplyPool(s).Workbench_Electricity || 0,
     geothermal: geothermalPower(s),
   };
+}
+function sinkStatus(id) {
+  if (I[id]?.fluid) return { ok: false, reason: "流体不能直接回收，需先封装" };
+  if (NON_SINKABLE.has(id) || isPowerItem(id)) return { ok: false, reason: "该物品不能送入回收站" };
+  return { ok: true, points: SINK_POINTS[id] ?? null };
+}
+function surplusSinkPlan(surplus, s = state) {
+  const amounts = {};
+  for (const [id, mode] of Object.entries(s.surplusHandling || {}))
+    if (mode === "sink" && (surplus[id] || 0) > 1e-5 && sinkStatus(id).ok) amounts[id] = surplus[id];
+  // Final products marked for the sink (e.g. packaged fluids) are sunk too.
+  for (const p of s.products || [])
+    if (p.sink && p.q > EPS && sinkStatus(materialId(p.id)).ok)
+      amounts[materialId(p.id)] = (amounts[materialId(p.id)] || 0) + p.q;
+  const items = Object.entries(amounts)
+    .map(([id, q]) => ({ id, q, points: q * (SINK_POINTS[id] || 0), known: id in SINK_POINTS }));
+  const total = items.reduce((a, x) => a + x.q, 0);
+  // Every sink takes one belt; merged belts share sinks up to the Mk.6 rate.
+  const count = total > 1e-5 ? Math.ceil(total / SINK_RATE - 1e-9) : 0;
+  return {
+    items,
+    total,
+    count,
+    power: count * SINK_POWER * s.powerMult,
+    points: items.reduce((a, x) => a + x.points, 0),
+    unknown: items.filter((x) => !x.known).map((x) => x.id),
+  };
+}
+function surplusConsumers(id, q, s = state, limit = 3) {
+  const unlocked = new Set(s.optimizationSettings?.alternates || []),
+    chosen = new Set(Object.values(s.selected || {}));
+  return Object.keys(R)
+    .filter((k) => {
+      const r = R[k];
+      return r.kind === "machine" && !r.generation && !r.groupParent && r.ins?.[id] > 0 &&
+        !(r.outs?.[id] > 0) && (s.event || !r.event) && (!r.alt || unlocked.has(k) || chosen.has(k));
+    })
+    .map((k) => {
+      const r = R[k],
+        main = Object.keys(r.outs).find((o) => I[o]?.selectable && !I[o].handOnly && !isPowerItem(o));
+      if (!main) return null;
+      const runs = q / r.ins[id];
+      return {
+        k,
+        main,
+        out: runs * r.outs[main],
+        others: Object.entries(r.ins).filter(([x]) => x !== id).map(([x, v]) => [x, runs * v]),
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) =>
+      a.others.length - b.others.length ||
+      Number(!!R[a.k].alt) - Number(!!R[b.k].alt) ||
+      (SINK_POINTS[b.main] || 0) * b.out - (SINK_POINTS[a.main] || 0) * a.out ||
+      a.k.localeCompare(b.k))
+    .slice(0, limit);
+}
+function variantProductItem(base, s = state) {
+  base = materialId(base);
+  for (let n = 1; n <= 10000; n++) {
+    const id = base + "__product_" + n;
+    if (!s.products.some((p) => p.id === id)) {
+      ensureProductItem(id);
+      return id;
+    }
+  }
+  return null;
+}
+// Add q of item `main` made by recipe k as a final product, merging into an
+// existing card with the same material and recipe.
+function addProductOutput(main, k, q, s = state, extra = {}) {
+  const same = s.products.find((p) => materialId(p.id) === main && recipeFor(p.id, s) === k && !!p.sink === !!extra.sink);
+  if (same) {
+    same.q = cleanComputedQuantity(same.q + q);
+    return same.id;
+  }
+  const pid = recipeFor(main, s) === k && !s.products.some((p) => p.id === main) ? main : variantProductItem(main, s);
+  if (!pid) return null;
+  if (recipeFor(pid, s) !== k) s.selected[pid] = k;
+  s.products.push({ id: pid, q: cleanComputedQuantity(q), lock: false, pin: false, ...extra });
+  return pid;
+}
+function addSurplusConsumer(id, k, s = state) {
+  const q = current?.surplus?.[id] || 0,
+    c = surplusConsumers(id, q, s, Infinity).find((x) => x.k === k);
+  if (!c || !(c.out > EPS)) return null;
+  const pid = addProductOutput(c.main, k, c.out, s);
+  return pid ? { pid, ...c } : null;
+}
+// Packaging route that turns a fluid into a sinkable item.
+function surplusPackaging(id, q, s = state) {
+  const k = Object.keys(R).find((r) => R[r].b === "Build_Packager_C" && !/Unpackage/.test(r) && R[r].ins[id] > 0 && (s.event || !R[r].event));
+  if (!k) return null;
+  const main = Object.keys(R[k].outs)[0];
+  if (!sinkStatus(main).ok) return null;
+  const out = (q / R[k].ins[id]) * R[k].outs[main],
+    container = Object.keys(R[k].ins).find((x) => x !== id);
+  return { k, main, out, container, containerQ: container ? (q / R[k].ins[id]) * R[k].ins[container] : 0, points: out * (SINK_POINTS[main] || 0) };
+}
+// Generators that can burn the item as fuel (water is only coolant).
+function surplusGenerators(id, q, s = state) {
+  if (id === "Desc_Water_C") return [];
+  return Object.keys(R)
+    .filter((k) => R[k].generation && R[k].ins?.[id] > 0)
+    .map((k) => {
+      const rr = rates(k, s),
+        mw = (q / rr.ins[id]) * (rr.outs.Workbench_Electricity || 0);
+      return { k, mw, others: Object.entries(rr.ins).filter(([x]) => x !== id).map(([x, v]) => [x, (q / rr.ins[id]) * v]) };
+    })
+    .filter((g) => g.mw > EPS);
+}
+function addSurplusPackaging(id, s = state) {
+  let q = current?.surplus?.[id] || 0,
+    first = null,
+    out = 0,
+    containerQ = 0;
+  // Containers can themselves create more of the fluid (canisters need
+  // plastic, which leaves residue), so repeat until the surplus is gone.
+  for (let i = 0; i < 30 && q > 1e-4; i++) {
+    const pack = surplusPackaging(id, q, s);
+    if (!pack || !(pack.out > EPS)) break;
+    if (!addProductOutput(pack.main, pack.k, pack.out, s, { sink: true })) break;
+    first ??= pack;
+    out += pack.out;
+    containerQ += pack.containerQ;
+    const plan = summarize(planSolve(demands(s), s, { mode: s.mode }), s);
+    q = plan?.surplus?.[id] || 0;
+  }
+  if (!first) return null;
+  const card = s.products.find((p) => p.sink && materialId(p.id) === first.main && recipeFor(p.id, s) === first.k);
+  if (card) card.q = Math.round(card.q * 1000) / 1000;
+  return { ...first, pid: card?.id, out, containerQ, points: out * (SINK_POINTS[first.main] || 0) };
+}
+function addSurplusGenerator(id, k, s = state) {
+  const g = surplusGenerators(id, current?.surplus?.[id] || 0, s).find((x) => x.k === k);
+  if (!g) return null;
+  const pid = nextPowerItem(s);
+  if (!pid) return null;
+  ensureProductItem(pid);
+  s.selected[pid] = k;
+  s.products.push({ id: pid, q: cleanComputedQuantity(g.mw), lock: false, pin: false });
+  return { pid, ...g };
+}
+// Reverse planning: run every last machine at full clock, working from the
+// most downstream recipe upstream, and add the extra output as products.
+function fillLastMachines(s = state) {
+  if (s.mode !== "reverse") return { ok: false, reason: "仅在“从产物反推”模式下可用。" };
+  const added = [];
+  for (let step = 0; step < 200; step++) {
+    const solution = planSolve(demands(s), s, { mode: "reverse" }),
+      plan = summarize(solution, s);
+    if (!plan) return { ok: false, reason: "方案不可行，已停止。", added };
+    const order = machineDisplayOrder(plan.rows, { ...s, machineSort: "flow" }, plan);
+    const partial = order
+      .filter((row) => {
+        const r = R[row.k];
+        if (r.generation || machineGroup(row.k, s)) return false;
+        const main = Object.keys(r.outs)[0];
+        if (!I[main]?.selectable || I[main].handOnly || isPowerItem(main)) return false;
+        const target = Math.ceil(row.eq / row.cap - 1e-6) * row.cap;
+        return target - row.eq > 1e-6 * Math.max(1, row.cap);
+      })
+      .pop();
+    if (!partial) return { ok: true, added };
+    const main = Object.keys(R[partial.k].outs)[0],
+      target = Math.ceil(partial.eq / partial.cap - 1e-6) * partial.cap,
+      q = (target - partial.eq) * rates(partial.k, s).outs[main];
+    const recipe = recipeBase(partial.k),
+      existing = s.products.find((p) => materialId(p.id) === main && recipeFor(p.id, s) === recipe);
+    const pid = existing ? ((existing.q = cleanComputedQuantity(existing.q + q)), existing.id) : addProductOutput(main, recipe, q, s);
+    if (!pid) return { ok: false, reason: "无法添加产物。", added };
+    added.push({ id: main, recipe: partial.k, q });
+  }
+  return { ok: false, reason: "迭代次数过多，已停止。", added };
+}
+function addSurplusAsProduct(id, s = state) {
+  const q = current?.surplus?.[id] || 0;
+  if (!(q > EPS) || !I[id]?.selectable || I[id].handOnly) return null;
+  const pid = nextProductItem(id, s);
+  if (!pid) return null;
+  s.products.push({ id: pid, q: cleanComputedQuantity(q), lock: false, pin: false });
+  return pid;
 }
 function diagnose(id, q, s = state) {
   const d = { ...lockedDemands(s, id), [id]: q };
@@ -872,6 +1089,7 @@ function reuseAndStartup(plan, s = state) {
         toTarget: 0,
         surplus: 0,
         sources: new Set(),
+        consumers: new Map(),
       };
       entry.produced += q;
       entry.sources.add(row.k);
@@ -880,7 +1098,10 @@ function reuseAndStartup(plan, s = state) {
   for (const e of graph.edges) {
     const entry = items.get(e.item);
     if (!entry || !entry.sources.has(e.from)) continue;
-    if (recipeIds.has(e.to)) entry.reused += e.q;
+    if (recipeIds.has(e.to)) {
+      entry.reused += e.q;
+      entry.consumers.set(e.to, (entry.consumers.get(e.to) || 0) + e.q);
+    }
     else if (e.to.startsWith("p:")) entry.toTarget += e.q;
     else if (e.to.startsWith("w:")) entry.surplus += e.q;
   }
@@ -901,6 +1122,8 @@ function reuseAndStartup(plan, s = state) {
         steady,
         startup,
         additional: Math.max(0, startup - steady),
+        rate: entry.produced > EPS ? Math.min(1, entry.reused / entry.produced) : 0,
+        consumers: [...entry.consumers].sort((a, b) => b[1] - a[1]),
       };
     })
     .sort(
@@ -910,12 +1133,148 @@ function reuseAndStartup(plan, s = state) {
         a.id.localeCompare(b.id),
     );
 }
+function renderSurplusHandling(p) {
+  const surplus = Object.entries(p.surplus)
+    .filter(([id, q]) => q > 1e-5 && !isPowerItem(id))
+    .sort((a, b) => b[1] - a[1]);
+  if (!surplus.length) {
+    $("surplus").innerHTML = "<p>没有多余副产物。</p>";
+    return;
+  }
+  const sink = p.sink,
+    pending = surplus.filter(([id]) => state.surplusHandling[id] !== "sink" || !sinkStatus(id).ok);
+  const summary = `<div class="chipline"><span class="chip">待处理 / 外送 <b>${pending.length}</b> 种</span><span class="chip">送入回收站 <b>${fmt(sink.total)}</b> 件/分</span><span class="chip">AWESOME回收站 <b>${sink.count}</b> 座 · <b>${fmt(sink.power)}</b> MW</span><span class="chip">回收积分 <b>${fmt(sink.points)}</b> / 分</span></div>${sink.unknown.length ? `<p class="small">未收录回收积分：${sink.unknown.map((id) => esc(I[id]?.name || id)).join("、")}（按 0 计）。</p>` : ""}`;
+  const rows = surplus.map(([id, q]) => {
+    const status = sinkStatus(id),
+      mode = status.ok && state.surplusHandling[id] === "sink" ? "sink" : "export",
+      points = status.ok && status.points != null ? fmt(q * status.points) : "—",
+      ideas = surplusConsumers(id, q),
+      pack = I[id]?.fluid ? surplusPackaging(id, q) : null,
+      generators = surplusGenerators(id, q);
+    const fluidNote = I[id]?.fluid
+      ? `<div class="small fluid-note">流体：${state.strict ? "已开启“禁止多余流体外送”，需在下游消纳或封装。" : "外送需管道或流体储罐；也可封装成桶装件运输或回收。"}</div>`
+      : "";
+    const handling = `<select data-surplus-mode="${esc(id)}" aria-label="${esc(I[id]?.name || id)}处理方式"><option value="export"${mode === "export" ? " selected" : ""}>待处理 / 外送</option><option value="sink"${mode === "sink" ? " selected" : ""}${status.ok ? "" : " disabled"}>送入AWESOME回收站</option></select>${status.ok || I[id]?.fluid ? "" : `<div class="small">${esc(status.reason)}</div>`}${fluidNote}<div class="buttons" style="margin-top:6px">${I[id]?.selectable && !I[id].handOnly ? `<button data-surplus-product="${esc(id)}">设为最终产物</button>` : ""}${pack ? `<button data-surplus-pack="${esc(id)}" title="${esc(R[pack.k].name)}：至少 ${fmt(pack.out)} 件/分，另需${esc(I[pack.container]?.name || "")}；制造容器若再产生该流体，会一并封装">封装成${esc(I[pack.main]?.name || pack.main)}送回收站</button>` : ""}${generators.map((g) => `<button data-surplus-gen="${esc(id)}" data-surplus-recipe="${esc(g.k)}" title="${g.others.length ? "另需 " + g.others.map(([x, v]) => (I[x]?.name || x) + " " + fmt(v)).join("、") : ""}">送入${esc(B[R[g.k].b]?.name || R[g.k].name)} · ${fmt(g.mw)} MW</button>`).join("")}</div>`;
+    const consumers = ideas.length
+      ? ideas.map((c) => `<div class="surplus-idea"><div><b>${esc(R[c.k].name)}</b>${R[c.k].alt ? " [替代]" : ""} → ${esc(I[c.main]?.name || c.main)} 约 <b>${fmt(c.out)}</b> ${unit(c.main)}${c.others.length ? `<div class="small">另需 ${c.others.map(([x, v]) => esc(I[x]?.name || x) + " " + fmt(v)).join("、")}</div>` : ""}</div><button data-surplus-use="${esc(id)}" data-surplus-recipe="${esc(c.k)}">按剩余量添加产物</button></div>`).join("")
+      : '<span class="small">没有可用的下游配方</span>';
+    return `<tr><td class="wrap"><div class="itemhead">${icon(id)}<div>${esc(I[id]?.name || id)}<small style="display:block">${unit(id)}</small></div></div></td><td><b>${fmt(q)}</b></td><td class="wrap">${handling}</td><td>${points}</td><td class="wrap">${consumers}</td></tr>`;
+  });
+  $("surplus").innerHTML = summary + `<div class="tablewrap"><table><thead><tr><th>剩余物料</th><th>剩余 / 分</th><th>处理方式</th><th>回收积分 / 分</th><th>下游消纳建议</th></tr></thead><tbody>${rows.join("")}</tbody></table></div>`;
+}
+function initSurplusHandling() {
+  $("surplus").addEventListener("change", (e) => {
+    const id = e.target.dataset?.surplusMode;
+    if (!id) return;
+    if (e.target.value === "sink" && sinkStatus(id).ok) state.surplusHandling[id] = "sink";
+    else delete state.surplusHandling[id];
+    renderAll();
+    setStatus(e.target.value === "sink" ? `${I[id]?.name || id}已送入回收站，耗电与积分已计入。` : `${I[id]?.name || id}改为待处理 / 外送。`);
+  });
+  $("surplus").addEventListener("click", (e) => {
+    const use = e.target.closest("[data-surplus-use]"),
+      product = e.target.closest("[data-surplus-product]"),
+      pack = e.target.closest("[data-surplus-pack]"),
+      gen = e.target.closest("[data-surplus-gen]");
+    if (pack) {
+      const added = addSurplusPackaging(pack.dataset.surplusPack);
+      if (!added) return setStatus("该流体没有可回收的封装配方。", true);
+      renderAll();
+      setStatus(`已添加 ${I[added.main]?.name || added.main} ${fmt(added.out)} 件/分并送入回收站（需${I[added.container]?.name || "容器"} ${fmt(added.containerQ)}）。`, !current);
+    } else if (gen) {
+      const added = addSurplusGenerator(gen.dataset.surplusGen, gen.dataset.surplusRecipe);
+      if (!added) return setStatus("无法添加发电目标。", true);
+      renderAll();
+      setStatus(`已添加发电目标 ${fmt(added.mw)} MW（${R[added.k].name}）。`, !current);
+    } else if (use) {
+      const added = addSurplusConsumer(use.dataset.surplusUse, use.dataset.surplusRecipe);
+      if (!added) return setStatus("无法添加该下游产物。", true);
+      renderAll();
+      setStatus(`已添加 ${I[added.main]?.name || added.main} ${fmt(added.out)} ${unit(added.main)}（${R[added.k].name}）。${current ? "" : "当前供给不足以满足其他输入，可撤销或补充供给。"}`, !current);
+    } else if (product) {
+      const pid = addSurplusAsProduct(product.dataset.surplusProduct);
+      if (!pid) return setStatus("无法将该物料设为最终产物。", true);
+      renderAll();
+      setStatus(`已将剩余的${I[pid]?.name || pid}设为最终产物。`);
+    }
+  });
+}
+// Recipe loops (strongly connected components of the flow graph): what
+// circulates inside, what enters and leaves, and the cheapest place to prime.
+function recycleLoops(plan = current, s = state) {
+  if (!plan) return [];
+  const g = flowGraph(plan, s);
+  return constructionStages(plan, s)
+    .filter((stage) => stage.cycle)
+    .map((stage) => {
+      const inside = new Set(stage.keys),
+        internal = {},
+        inputs = {},
+        outputs = {},
+        links = [];
+      const add = (map, id, q) => (map[id] = (map[id] || 0) + q);
+      for (const e of g.edges) {
+        const a = inside.has(e.from),
+          b = inside.has(e.to);
+        if (a && b) {
+          add(internal, e.item, e.q);
+          links.push(e);
+        } else if (b) add(inputs, e.item, e.q);
+        else if (a) add(outputs, e.item, e.q);
+      }
+      // A single item is a valid priming point when removing its in-loop
+      // links leaves the loop acyclic.
+      const acyclicWithout = (item) => {
+        const adj = new Map(stage.keys.map((k) => [k, []]));
+        for (const e of links) if (e.item !== item) adj.get(e.from).push(e.to);
+        const state = new Map();
+        const visit = (k) => {
+          if (state.get(k) === 1) return false;
+          if (state.get(k) === 2) return true;
+          state.set(k, 1);
+          for (const n of adj.get(k)) if (!visit(n)) return false;
+          state.set(k, 2);
+          return true;
+        };
+        return stage.keys.every(visit);
+      };
+      const prime = Object.entries(internal)
+        .filter(([id]) => acyclicWithout(id))
+        .sort((a, b) => a[1] - b[1])[0];
+      return {
+        keys: stage.keys,
+        internal,
+        inputs,
+        outputs,
+        prime: prime ? { id: prime[0], q: prime[1] } : null,
+      };
+    });
+}
 function renderReuseAndStartup(plan) {
-  const rows = reuseAndStartup(plan);
+  const rows = reuseAndStartup(plan),
+    name = (k) => esc(R[k]?.name || k),
+    list = (map) =>
+      Object.entries(map)
+        .filter(([, q]) => q > 1e-5)
+        .sort((a, b) => b[1] - a[1])
+        .map(([id, q]) => `${esc(I[id]?.name || id)} <b>${fmt(q)}</b> ${unit(id)}`)
+        .join("<br>") || "—";
   const table = rows.length
-    ? `<div class="tablewrap"><table><thead><tr><th>副产物</th><th>产生 / 分</th><th>内部回用 / 分</th><th>最终产物 / 分</th><th>待处理 / 分</th><th>启动供给能力 / 分</th><th>稳态外供 / 分</th><th>回用后可减少 / 分</th></tr></thead><tbody>${rows.map((r) => `<tr><td>${esc(I[r.id]?.name || r.id)}<small> ${unit(r.id)}</small>${r.steady < EPS && r.additional > EPS ? '<div class="badge">需预充或临时外供</div>' : ""}</td><td>${fmt(r.produced)}</td><td>${fmt(r.reused)}</td><td>${fmt(r.toTarget)}</td><td>${fmt(r.surplus)}</td><td><b>${fmt(r.startup)}</b></td><td>${fmt(r.steady)}</td><td>${fmt(r.additional)}</td></tr>`).join("")}</tbody></table></div>`
+    ? `<div class="tablewrap"><table><thead><tr><th>副产物</th><th>产生 / 分</th><th>内部回用 / 分</th><th>回用率</th><th>回用去向</th><th>最终产物 / 分</th><th>待处理 / 分</th><th>启动供给能力 / 分</th><th>稳态外供 / 分</th><th>回用后可减少 / 分</th></tr></thead><tbody>${rows.map((r) => `<tr><td>${esc(I[r.id]?.name || r.id)}<small> ${unit(r.id)}</small>${r.steady < EPS && r.additional > EPS ? '<div class="badge">需预充或临时外供</div>' : ""}</td><td>${fmt(r.produced)}</td><td>${fmt(r.reused)}</td><td>${fmt(r.rate * 100)}%</td><td class="wrap small">${r.consumers.map(([k, q]) => `${name(k)} ${fmt(q)}`).join("<br>") || "—"}</td><td>${fmt(r.toTarget)}</td><td>${fmt(r.surplus)}</td><td><b>${fmt(r.startup)}</b></td><td>${fmt(r.steady)}</td><td>${fmt(r.additional)}</td></tr>`).join("")}</tbody></table></div>`
     : '<p class="small">当前方案没有产生需要回用的副产物。</p>';
-  $("processBalance").innerHTML = table;
+  const loops = recycleLoops(plan);
+  const loopCards = loops.length
+    ? `<h3 style="margin:16px 0 8px">回流环路</h3><div class="recycle-loops">${loops
+        .map(
+          (l, i) => `<div class="recycle-loop"><b>环路 ${i + 1}</b>：${l.keys.map(name).join(" ⇄ ")}<div class="recycle-grid"><div><span class="small">环内循环 / 分</span><br>${list(l.internal)}</div><div><span class="small">环外输入 / 分</span><br>${list(l.inputs)}</div><div><span class="small">环外输出 / 分</span><br>${list(l.outputs)}</div></div><p class="small">${
+            l.prime
+              ? `启动：在 <b>${esc(I[l.prime.id]?.name || l.prime.id)}</b> 回流处临时外供 <b>${fmt(l.prime.q)}</b> ${unit(l.prime.id)} 即可带动整个环路；回流稳定到达后撤除。`
+              : "启动：该环路由多种物料交叉回流，需在每条回流线上各自预充或临时外供。"
+          } 建议在回流线上设置储物箱或流体储罐作缓冲，避免下游短时停机导致整环停转。</p></div>`,
+        )
+        .join("")}</div>`
+    : "";
+  $("processBalance").innerHTML = table + loopCards;
 }
 
 function flowGraph(plan, s = state) {
@@ -1015,6 +1374,11 @@ function builtCount(key, n, s = state) {
 function machineIsBuilt(row, s = state) {
   return row.n > 0 && builtCount("recipe:" + row.k, row.n, s) >= row.n;
 }
+function machineUnlock(k) {
+  const id = BUILDING_UNLOCK[R[recipeBase(k)]?.b || R[k]?.b],
+    m = PROGRESSION.milestones.find((x) => x.id === id);
+  return m ? { id, tier: m.tier, order: m.order, name: m.name } : null;
+}
 function machineDisplayOrder(rows, s = state, plan = null) {
   const flow = flowGraph(plan || { rows, external: {} }, s);
   prepareBoardLayout(flow, s);
@@ -1029,9 +1393,15 @@ function machineDisplayOrder(rows, s = state, plan = null) {
       ...row,
       flowStage: levels.indexOf(nodes.get(row.k)?.level) + 1,
       flowCycle: !!nodes.get(row.k)?.cycle,
+      unlock: machineUnlock(row.k),
     }))
     .sort(
       (a, b) =>
+        (s.machineSort === "flow"
+          ? 0
+          : (a.unlock?.tier ?? 99) - (b.unlock?.tier ?? 99) ||
+            (a.unlock?.order ?? 99) - (b.unlock?.order ?? 99) ||
+            Number(!!R[a.k].alt) - Number(!!R[b.k].alt)) ||
         a.flowStage - b.flowStage ||
         (nodes.get(a.k)?.y || 0) - (nodes.get(b.k)?.y || 0) ||
         a.k.localeCompare(b.k),
@@ -4947,7 +5317,7 @@ function paintBoard() {
         : {
             external: "外部供给",
             product: "目标产物",
-            surplus: "副产物 / 待处理",
+            surplus: state.surplusHandling?.[n.item] === "sink" ? "送入AWESOME回收站" : "副产物 / 待处理",
           }[n.type],
       isBuilt = row && machineIsBuilt(row, graphPreview?.s || state);
     svg += `<g data-board-node="${esc(n.id)}" transform="translate(${n.x},${n.y})" opacity="${boardSelected && !highlight.has(n.id) ? 0.55 : 1}" role="button" tabindex="0" aria-label="${esc(n.label)}：查看产线明细" style="cursor:grab"><title>${esc(n.label)}</title><rect width="380" height="${n.h}" rx="12" fill="white" stroke="${boardSelected === n.id ? "#e5a23f" : color}" stroke-width="${boardSelected === n.id ? 3 : 1.4}"/><path d="M12 1H368" stroke="${color}" stroke-width="4"/>${ICONS[materialId(n.item)] ? `<image href="${ICONS[materialId(n.item)]}" x="14" y="16" width="32" height="32"/>` : ""}${boardText(n.label, 54, 31, 14, "#172534", 21)}${boardText(sub + (n.cycle ? " · 循环工序" : "") + (isBuilt ? " · ✓已建" : ""), 54, 50, 11, color, 31)}${boardText(row ? machineLabel(row) : fmt(n.q) + " " + unit(n.item), 14, 77, 12, "#334155", 43)}<g data-board-fold="${esc(n.id)}" role="button" tabindex="0" aria-label="${n.fold ? "展开" : "收起"}卡片" style="cursor:pointer"><rect x="344" y="12" width="24" height="24" rx="5" fill="#edf2f7"/>${boardText(n.fold ? "+" : "−", 351, 29, 16)}</g>`;
@@ -5897,10 +6267,11 @@ function safeState(x) {
     q: amount(x.inputConstraint?.q ?? 300),
   };
   s.sort = ["desc", "asc", "default"].includes(x.sort) ? x.sort : "desc";
+  s.machineSort = x.machineSort === "flow" ? "flow" : "milestone";
   const seen = new Set();
   s.products = (x.products || [])
     .filter((p) => I[p.id]?.selectable && !seen.has(p.id) && seen.add(p.id))
-    .map((p) => ({ id: p.id, q: amount(p.q), lock: !!p.lock, pin: !!p.pin }));
+    .map((p) => ({ id: p.id, q: amount(p.q), lock: !!p.lock, pin: !!p.pin, ...(p.sink && sinkStatus(materialId(p.id)).ok ? { sink: true } : {}) }));
   const supplySeen = new Set();
   s.supplies = (x.supplies || [])
     .filter(
@@ -5951,6 +6322,10 @@ function safeState(x) {
     pipe: +x.transport?.pipe === 300 ? 300 : 600,
   };
   s.board = normalizeBoard(x.board);
+  s.surplusHandling = Object.fromEntries(
+    Object.entries(x.surplusHandling && typeof x.surplusHandling === "object" ? x.surplusHandling : {})
+      .filter(([id, mode]) => I[id] && mode === "sink"),
+  );
   s.routing = { enabled: !!x.routing?.enabled, edges: Array.isArray(x.routing?.edges) ? x.routing.edges.filter(e => typeof e?.from === 'string' && typeof e?.to === 'string' && !!I[e.item] && (e.limit == null || (Number.isFinite(e.limit) && e.limit >= 0))).slice(0, 2000).map(e => ({from:e.from,to:e.to,item:e.item,limit:e.limit == null ? null : amount(e.limit)})) : [] };
   s.rail = normalizeRail(x.rail);
   s.sloops = Object.fromEntries(
@@ -6108,6 +6483,8 @@ function recipeSelect(id, cls = "") {
 function controls() {
   for (const k of ["over", "strict", "event", "autoPin"])
     $(k).checked = state[k];
+  if ($("machineSort")) $("machineSort").value = state.machineSort;
+  if ($("fillLastMachines")) $("fillLastMachines").hidden = state.mode !== "reverse";
   for (const k of ["mode", "sort", "clockNum", "powerMult"])
     $(k).value = ["mode", "sort"].includes(k) ? state[k] : displayNumber(state[k === "clockNum" ? "clock" : k]);
   $("clock").max = $("clockNum").max = state.over ? 250 : 100;
@@ -6180,7 +6557,7 @@ function renderProducts() {
     productOrder()
       .map(
         (p) =>
-          `<div class="card${p.q > EPS ? " active" : ""}${p.lock ? " locked" : ""}" id="product-${p.id}"><div class="top"><div class="itemhead">${icon(p.id)}<div><h3>${esc(productTitle(p.id))}</h3><small>${esc(I[p.id].en)}</small></div></div><div class="actions"><button data-pin="${p.id}" class="${p.pin ? "pinon" : ""}" aria-pressed="${p.pin}">${p.pin ? "已置顶" : "置顶"}</button><button data-lock="${p.id}" aria-pressed="${p.lock}">${p.lock ? "已锁定" : "锁定"}</button><button data-duplicate-product="${p.id}" title="添加同物品的独立产物卡片">＋</button><button data-delproduct="${p.id}" aria-label="删除产物">×</button></div></div>${isPowerItem(p.id) ? '' : ""}${recipeSelect(p.id)}<div class="amountline"><input type="number" min="0" max="100000000" step="any" data-quantity="${p.id}" value="${displayNumber(+p.q.toFixed(3))}" ${p.lock ? "disabled" : ""} aria-label="${esc(I[p.id].name)}产量"><small>${unit(p.id)}</small><button data-maxproduct="${p.id}" ${p.lock ? "disabled" : ""}>${state.mode === "reverse" ? "反推此产量" : isPowerItem(p.id) ? "剩余资源优先发电" : "优先分配"}</button></div><input type="range" min="0" max="${Math.max(100, Math.ceil(p.q * 1.5))}" step="1" value="${Math.round(p.q)}" data-slider="${p.id}" ${p.lock ? "disabled" : ""} aria-label="${esc(I[p.id].name)}整数产量滑条"><div id="single-${p.id}" class="small"></div><div id="cap-${p.id}" class="small"></div></div>`,
+          `<div class="card${p.q > EPS ? " active" : ""}${p.lock ? " locked" : ""}" id="product-${p.id}"><div class="top"><div class="itemhead">${icon(p.id)}<div><h3>${esc(productTitle(p.id))}</h3><small>${esc(I[p.id].en)}</small></div></div><div class="actions"><button data-pin="${p.id}" class="${p.pin ? "pinon" : ""}" aria-pressed="${p.pin}">${p.pin ? "已置顶" : "置顶"}</button><button data-lock="${p.id}" aria-pressed="${p.lock}">${p.lock ? "已锁定" : "锁定"}</button>${!isPowerItem(p.id) && sinkStatus(materialId(p.id)).ok ? `<button data-product-sink="${p.id}" aria-pressed="${!!p.sink}" title="把该产物送入AWESOME回收站，计入回收站耗电与积分">${p.sink ? "回收站✓" : "回收站"}</button>` : ""}<button data-duplicate-product="${p.id}" title="添加同物品的独立产物卡片">＋</button><button data-delproduct="${p.id}" aria-label="删除产物">×</button></div></div>${isPowerItem(p.id) ? '' : ""}${recipeSelect(p.id)}<div class="amountline"><input type="number" min="0" max="100000000" step="any" data-quantity="${p.id}" value="${displayNumber(+p.q.toFixed(3))}" ${p.lock ? "disabled" : ""} aria-label="${esc(I[p.id].name)}产量"><small>${unit(p.id)}</small><button data-maxproduct="${p.id}" ${p.lock ? "disabled" : ""}>${state.mode === "reverse" ? "反推此产量" : isPowerItem(p.id) ? "剩余资源优先发电" : "优先分配"}</button></div><input type="range" min="0" max="${Math.max(100, Math.ceil(p.q * 1.5))}" step="1" value="${Math.round(p.q)}" data-slider="${p.id}" ${p.lock ? "disabled" : ""} aria-label="${esc(I[p.id].name)}整数产量滑条"><div id="single-${p.id}" class="small"></div><div id="cap-${p.id}" class="small"></div></div>`,
       )
       .join("") ||
     '<div class="empty">尚未添加产物。搜索添加你想生产的物品。</div>';
@@ -6294,12 +6671,18 @@ function renderRouting() {
     el.innerHTML = choices.map(([v, label]) => `<option value="${esc(v)}">${esc(label)}</option>`).join('');
     if (choices.some(([v]) => v === previous)) el.value = previous;
   };
-  select('routingFrom', nodes.filter(n => n.type !== 'product').map(n => [n.id,n.label]));
-  select('routingTo', nodes.filter(n => n.type !== 'external').map(n => [n.id,n.label]));
-  const from = $('routingFrom').value, to = $('routingTo').value;
-  const produced = from.startsWith('e:') ? [from.slice(2)] : Object.keys(R[from]?.outs || {});
-  const accepted = to.startsWith('p:') ? [materialId(to.slice(2))] : Object.keys(R[to]?.ins || {});
-  select('routingItem', produced.filter(id => accepted.includes(id)).map(id => [id,I[id]?.name || id]));
+  const produced = id => id.startsWith('e:') ? [id.slice(2)] : Object.keys(R[id]?.outs || {});
+  const accepted = id => id.startsWith('p:') ? [materialId(id.slice(2))] : Object.keys(R[id]?.ins || {});
+  const compatible = (from, to) => from !== to ? produced(from).filter(id => accepted(to).includes(id)) : [];
+  // Only offer destinations that can receive something from the chosen
+  // source, so the material list is never left empty by an incompatible pair.
+  const sources = nodes.filter(n => n.type !== 'product' && nodes.some(t => t.type !== 'external' && compatible(n.id, t.id).length));
+  select('routingFrom', sources.map(n => [n.id,n.label]));
+  const from = $('routingFrom').value;
+  select('routingTo', nodes.filter(n => n.type !== 'external' && compatible(from, n.id).length).map(n => [n.id,n.label]));
+  const to = $('routingTo').value;
+  select('routingItem', compatible(from, to).map(id => [id,I[id]?.name || id]));
+  $('routingAdd').disabled = !from || !to || !$('routingItem').value;
   const labels = new Map(nodes.map(n => [n.id,n.label]));
   $('routingList').innerHTML = routing.edges.length ? `<div class="tablewrap"><table><thead><tr><th>来源</th><th>物料</th><th>去向</th><th>上限 / 分</th><th>实际 / 分</th><th></th></tr></thead><tbody>${routing.edges.map((e,i) => `<tr><td>${esc(labels.get(e.from) || e.from)}</td><td>${esc(I[e.item]?.name || e.item)}</td><td>${esc(labels.get(e.to) || e.to)}</td><td>${e.limit == null ? '不限' : fmt(e.limit)}</td><td>${current ? fmt(current.routedEdges?.find(x => x.from === e.from && x.to === e.to && x.item === e.item)?.q || 0) : '—'}</td><td><button data-routing-remove="${i}">删除</button></td></tr>`).join('')}</tbody></table></div>` : '<p>尚无连接。</p>';
 }
@@ -6381,6 +6764,7 @@ function renderResults() {
     ["地热平均 / MW", fmt(geothermalPower().average)],
     ["外部电力 / MW", p ? fmt(p.importedPower || 0) : "—"],
     ["净余电 / MW", p ? fmt(p.generation + (p.importedPower || 0) - p.power - state.extraLoad) : "—"],
+    ...(p?.sink?.count ? [["回收站积分 / 分", fmt(p.sink.points)]] : []),
   ]
     .map(
       ([k, v]) =>
@@ -6422,17 +6806,7 @@ function renderResults() {
         return `<tr id="machine-${row.k}" class="${machineIsBuilt(row) ? "machine-built" : ""}"><td class="wrap"><div class="itemhead">${icon(R[row.k].b)}<div>${esc(B[R[row.k].b]?.name)}<br><small>${esc(R[row.k].name)}</small>${row.flowCycle ? '<div class="badge">循环回流</div>' : ""}${machineIsBuilt(row) ? '<div class="badge" style="margin-top:6px">✓ 已建成</div>' : ""}</div></div>${recipeSelect(main, "recipe-choice")}</td><td class="wrap machine-materials"><div class="machine-material-label">输入材料 · 本组总需求</div>${machineInputsCell(row)}<div class="machine-material-label machine-output-label">输出产物</div>${machineOutputsCell(row)}</td><td class="wrap">${machineLabel(row)}<div class="small" style="margin-top:8px"><b>末台${row.duty < 0.999999 ? "平均" : ""}产出：</b>${esc(lastMachineOutputText(row))}</div>${machineClockControl(row)}${sloopControl(row)}</td><td>${row.shards}</td><td>${R[row.k].generation ? "发电 " + fmt(row.outs.Workbench_Electricity || 0) + " MW" : fmt(row.power) + " / " + fmt(row.peak)}</td>${machineBuildCells(row)}</tr>`;
       })
       .join("") || '<tr><td colspan="7">暂无生产机器。</td></tr>';
-  const surplus = Object.entries(p.surplus).filter(([id, q]) => q > 1e-5);
-  $("surplus").innerHTML =
-    '<div class="chipline">' +
-    surplus
-      .map(
-        ([id, q]) =>
-          `<span class="chip">${esc(I[id]?.name || id)} <b>${fmt(q)} ${unit(id)}</b></span>`,
-      )
-      .join("") +
-    "</div>" +
-    (surplus.length ? "" : "<p>没有多余副产物。</p>");
+  renderSurplusHandling(p);
   renderReuseAndStartup(p);
   renderBill();
   if (!$("graphTab").hidden) renderGraph();
@@ -6860,6 +7234,14 @@ function init() {
       renderProducts();
       save();
     }
+    if (d.productSink) {
+      const p = state.products.find((x) => x.id === d.productSink);
+      if (p) {
+        if (p.sink) delete p.sink;
+        else p.sink = true;
+        renderAll();
+      }
+    }
     if (d.lock) {
       const p = state.products.find((x) => x.id === d.lock);
       p.lock = !p.lock;
@@ -7046,6 +7428,17 @@ function init() {
   $("clockNum").onchange = clock;
   $("powerMult").onchange = (e) => {
     state.powerMult = normalizeMultiplier(e.target.value);
+    renderAll();
+  };
+  $("fillLastMachines").onclick = () => {
+    const r = fillLastMachines();
+    renderAll();
+    if (!r.ok) return setStatus(r.reason, true);
+    setStatus(r.added.length ? `末台已全部满载：${r.added.length} 处余量加入产物（${[...new Set(r.added.map((x) => I[x.id]?.name || x.id))].join("、")}），已从下游往上游重新反推。` : "所有末台已满载，无需调整。");
+  };
+  $("machineSort").value = state.machineSort;
+  $("machineSort").onchange = (e) => {
+    state.machineSort = e.target.value === "flow" ? "flow" : "milestone";
     renderAll();
   };
   $("sort").onchange = (e) => {
@@ -8077,3 +8470,5 @@ function initMachineGroups() {
 initMachineGroups();
 
 initRouting();
+
+initSurplusHandling();
