@@ -291,30 +291,31 @@
       </section>
 
       <section id="graphTab" hidden>
-        <div class="panel">
-          <div class="toolbar">
-            <h2>产线连接图</h2>
-            <div class="buttons">
+        <div class="panel graph-panel">
+          <div class="toolbar graph-head">
+            <div class="graph-title">
+              <h2>产线连接图</h2>
+              <span id="graphSummary" class="graph-summary"></span>
+            </div>
+            <div class="graph-views" role="group" aria-label="视图">
               <button id="viewNetwork" class="selected">网络图</button
               ><button id="viewTree">树状图</button
-              ><button id="viewMind">思维导图 · 卡片画布</button
-              ><button id="graphFit">适应画布</button
+              ><button id="viewMind">卡片画布</button>
+            </div>
+            <div class="buttons graph-actions">
+              <button id="graphFit">适应画布</button
               ><button id="graphDetails" aria-pressed="false">
                 显示节点明细</button
-              ><button
-                id="graphFullscreen"
-                class="primary"
-                aria-pressed="false"
-              >
+              ><button id="graphFullscreen" aria-pressed="false">
                 全屏画布</button
               ><button id="downloadGraph">导出SVG</button>
             </div>
           </div>
-          <p>
-            边上的数字为每分钟物流量，节点显示机器及频率。循环回路保留连接；树状图中的共享工序仅展开一次。
+          <p class="graph-hint">
+            连线数字为每分钟物流量；虚线为循环回流，琥珀色线需要多条并行线路。树状图中的共享工序只展开一次。
           </p>
-          <div id="graphControls" class="buttons">
-            <label
+          <div id="graphControls" class="graph-controls">
+            <label class="graph-zoom"
               >缩放
               <input
                 id="graphZoom"
@@ -322,17 +323,21 @@
                 min="30"
                 max="150"
                 step="1"
-                value="75"
-                style="width: 170px" /></label
-            ><span class="small"
-              >橙：成品 · 青：外供 · 绿：工序 · 红：余量</span
-            >
+                value="75" /></label
+            ><div class="graph-legend" aria-label="图例">
+              <span><i class="sw sw-external"></i>外部供给</span
+              ><span><i class="sw sw-recipe"></i>生产工序</span
+              ><span><i class="sw sw-product"></i>最终产物</span
+              ><span><i class="sw sw-surplus"></i>副产物</span
+              ><span><i class="ln ln-fluid"></i>流体</span
+              ><span><i class="ln ln-cycle"></i>回流</span
+              ><span><i class="ln ln-multi"></i>需并行</span>
+            </div>
           </div>
           <div id="graphPreviewLabel" class="notice" hidden></div>
-          <details id="routingPanel">
-            <summary>手动连接物料</summary>
+          <details id="routingPanel" class="routing-card">
+            <summary><span>手动连接物料</span><small id="routingStatus"></small></summary>
             <div class="buttons"><button id="routingSeed">从自动产线生成连接</button><button id="routingToggle">启用手动连接</button></div>
-            <p id="routingStatus"></p>
             <div id="routingEditor" hidden>
               <div class="formgrid"><label>来源<select id="routingFrom"></select></label><label>物料<select id="routingItem"></select></label><label>去向<select id="routingTo"></select></label><label>线路上限 / 分（留空为不限）<input id="routingLimit" type="number" min="0" step="any"></label></div>
               <button id="routingAdd">添加连接</button>
@@ -343,18 +348,20 @@
             <div class="board-toolbar">
               <select id="mindProduct" aria-label="按最终产物筛选">
                 <option value="">全部最终产物</option></select
-              ><button id="boardAuto">自动排版</button
-              ><button id="boardFit">适应画布</button
-              ><button id="boardResetFocus">显示全图</button
-              ><button id="mindExpand">展开卡片</button
-              ><button id="mindCollapse">精简卡片</button
-              ><label
+              ><span class="tgroup" aria-label="布局"
+                ><button id="boardAuto">自动排版</button
+                ><button id="boardFit">适应画布</button
+                ><button id="boardResetFocus">显示全图</button></span
+              ><span class="tgroup" aria-label="卡片"
+                ><button id="mindExpand">展开卡片</button
+                ><button id="mindCollapse">精简卡片</button></span
+              ><label class="tcheck"
                 ><input id="mindSurplus" type="checkbox" checked />
                 副产物</label
-              ><label
+              ><label class="tcheck"
                 ><input id="boardLabels" type="checkbox" checked />
                 连线流量</label
-              ><label
+              ><label class="tzoom"
                 >缩放
                 <input
                   id="mindZoom"
