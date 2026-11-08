@@ -2778,3 +2778,6 @@ html[lang="en"] .board-caption {
   #graphTab #boardWorkspace { grid-template-columns: 1fr; }
   #graphTab .board-toolbar .tzoom { margin-left: 0; }
 }
+
+#graphTab .graph-note { font-size: 12px; color: #b45309; }
+#graphTab .graph-note:empty { display: none; }

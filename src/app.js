@@ -7168,6 +7168,10 @@ function renderGraph() {
   const textWidth = (t) => [...t].reduce((a, ch) => a + (/[\u0000-\u00ff]/.test(ch) ? 6.2 : 10.5), 0);
   let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-label="当前产线物料网络" style="font-family:system-ui,'Microsoft YaHei',sans-serif"><defs><pattern id="netDots" width="22" height="22" patternUnits="userSpaceOnUse"><circle cx="1.5" cy="1.5" r="1" fill="#d5dbe3"/></pattern>${["solid", "fluid", "cycle", "multi", "hot"].map((k) => `<marker id="arr-${k}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10Z" fill="${{ solid: "#94a3b8", fluid: "#38a3c9", cycle: "#e07a5f", multi: "#d97706", hot: "#dc2626" }[k]}"/></marker>`).join("")}</defs><rect width="100%" height="100%" fill="#f8fafc"/><rect width="100%" height="100%" fill="url(#netDots)"/>`;
   let labels = "";
+  // Dense plans: keep only highlighted / parallel-line labels; hover shows the rest.
+  const denseLabels = edges.length > 80;
+  if ($("graphLabelNote"))
+    $("graphLabelNote").textContent = denseLabels ? `连线 ${edges.length} 条，较多：只标注需并行的线路，其余悬停查看流量。` : "";
   for (const [i, e] of edges.entries()) {
     const a = map.get(e.from),
       b = map.get(e.to),
@@ -7192,6 +7196,7 @@ function renderGraph() {
       w = textWidth(text) + 14,
       lx = cycle || back ? x1 + 50 : (x1 + x2) / 2,
       ly = (y1 + y2) / 2 + ((i % 3) - 1) * 9;
+    if (denseLabels && !hot && lanes <= 1) continue;
     labels += `<g><rect x="${lx - w / 2}" y="${ly - 9}" width="${w}" height="18" rx="9" fill="#fff" stroke="${color}" stroke-opacity="0.45"/><text x="${lx}" y="${ly + 3.5}" font-size="10.5" fill="#334155" text-anchor="middle">${esc(text)}</text></g>`;
   }
   svg += labels;
@@ -7934,6 +7939,7 @@ Object.assign(EN_UI, {
   "回用率": "Reuse rate", "回用去向": "Reused by", "末台满载 · 余量加入产物": "Fill last machines · add extra as products",
   "自动生成连接，不限制物料流向。": "Links are generated automatically; material flow is not restricted.",
   "手动连接参与物料计算；未连接的工序不会自动供料。": "Manual links constrain the calculation; unlinked steps receive no material.",
+  "较多：只标注需并行的线路，其余悬停查看流量。": "many: only parallel lines are labeled; hover for the rest.",
   "按里程碑解锁": "By milestone unlock", "按产线上下游": "By flow order", "排序": "Sort", "回收站": "Sink",
 });
 const languagePattern = new RegExp(
