@@ -2712,7 +2712,7 @@ html[lang="en"] .board-caption {
               <div id="balance"></div>
             </div>
             <div class="panel">
-              <h2>05 / 机器与逐台频率</h2>
+              <div class="toolbar"><h2 style="margin: 0">05 / 机器与逐台频率</h2><label>排序 <select id="machineSort" aria-label="机器排序"><option value="milestone">按里程碑解锁</option><option value="flow">按产线上下游</option></select></label></div>
 
               <div class="tablewrap">
                 <table>
@@ -3747,6 +3747,23 @@ const SINK_POINTS = (() => {
 })();
 const SINK_RATE = 1200, SINK_POWER = 30;
 const NON_SINKABLE = new Set(["Desc_NuclearWaste_C", "Desc_PlutoniumWaste_C"]);
+// Milestone that unlocks each production building (Satisfactory 1.x).
+const BUILDING_UNLOCK = {
+  Build_SmelterMk1_C: "Schematic_Tutorial1_5_C",
+  Build_ConstructorMk1_C: "Schematic_Tutorial2_C",
+  Build_AssemblerMk1_C: "Schematic_2-1_C",
+  Build_GeneratorCoal_C: "Schematic_3-1_C",
+  Build_FoundryMk1_C: "Schematic_3-4_C",
+  Build_OilRefinery_C: "Schematic_5-1_C",
+  Build_Packager_C: "Schematic_5-4_C",
+  Build_GeneratorFuel_C: "Schematic_5-5_C",
+  Build_ManufacturerMk1_C: "Schematic_5-2_C",
+  Build_Blender_C: "Schematic_7-1_C",
+  Build_GeneratorNuclear_C: "Schematic_8-1_C",
+  Build_HadronCollider_C: "Schematic_8-5_C",
+  Build_Converter_C: "Schematic_9-1_C",
+  Build_QuantumEncoder_C: "Schematic_9-2_C",
+};
 function fresh() {
   return {
     version: 12,
@@ -3761,6 +3778,7 @@ function fresh() {
     strict: false,
     autoPin: true,
     sort: "desc",
+    machineSort: "milestone",
     powerMult: 1,
     generationMult: 1,
     costMult: 1,
@@ -4947,6 +4965,11 @@ function builtCount(key, n, s = state) {
 function machineIsBuilt(row, s = state) {
   return row.n > 0 && builtCount("recipe:" + row.k, row.n, s) >= row.n;
 }
+function machineUnlock(k) {
+  const id = BUILDING_UNLOCK[R[recipeBase(k)]?.b || R[k]?.b],
+    m = PROGRESSION.milestones.find((x) => x.id === id);
+  return m ? { id, tier: m.tier, order: m.order, name: m.name } : null;
+}
 function machineDisplayOrder(rows, s = state, plan = null) {
   const flow = flowGraph(plan || { rows, external: {} }, s);
   prepareBoardLayout(flow, s);
@@ -4961,9 +4984,15 @@ function machineDisplayOrder(rows, s = state, plan = null) {
       ...row,
       flowStage: levels.indexOf(nodes.get(row.k)?.level) + 1,
       flowCycle: !!nodes.get(row.k)?.cycle,
+      unlock: machineUnlock(row.k),
     }))
     .sort(
       (a, b) =>
+        (s.machineSort === "flow"
+          ? 0
+          : (a.unlock?.tier ?? 99) - (b.unlock?.tier ?? 99) ||
+            (a.unlock?.order ?? 99) - (b.unlock?.order ?? 99) ||
+            Number(!!R[a.k].alt) - Number(!!R[b.k].alt)) ||
         a.flowStage - b.flowStage ||
         (nodes.get(a.k)?.y || 0) - (nodes.get(b.k)?.y || 0) ||
         a.k.localeCompare(b.k),
@@ -9829,6 +9858,7 @@ function safeState(x) {
     q: amount(x.inputConstraint?.q ?? 300),
   };
   s.sort = ["desc", "asc", "default"].includes(x.sort) ? x.sort : "desc";
+  s.machineSort = x.machineSort === "flow" ? "flow" : "milestone";
   const seen = new Set();
   s.products = (x.products || [])
     .filter((p) => I[p.id]?.selectable && !seen.has(p.id) && seen.add(p.id))
@@ -10044,6 +10074,7 @@ function recipeSelect(id, cls = "") {
 function controls() {
   for (const k of ["over", "strict", "event", "autoPin"])
     $(k).checked = state[k];
+  if ($("machineSort")) $("machineSort").value = state.machineSort;
   for (const k of ["mode", "sort", "clockNum", "powerMult"])
     $(k).value = ["mode", "sort"].includes(k) ? state[k] : displayNumber(state[k === "clockNum" ? "clock" : k]);
   $("clock").max = $("clockNum").max = state.over ? 250 : 100;
@@ -10362,7 +10393,7 @@ function renderResults() {
             (p) =>
               recipeFor(p.id) === recipeBase(row.k) && R[row.k].outs[materialId(p.id)] > 0,
           )?.id || Object.keys(R[row.k].outs)[0];
-        return `<tr id="machine-${row.k}" class="${machineIsBuilt(row) ? "machine-built" : ""}"><td class="wrap"><div class="itemhead">${icon(R[row.k].b)}<div>${esc(B[R[row.k].b]?.name)}<br><small>${esc(R[row.k].name)}</small>${row.flowCycle ? '<div class="badge">循环回流</div>' : ""}${machineIsBuilt(row) ? '<div class="badge" style="margin-top:6px">✓ 已建成</div>' : ""}</div></div>${recipeSelect(main, "recipe-choice")}</td><td class="wrap machine-materials"><div class="machine-material-label">输入材料 · 本组总需求</div>${machineInputsCell(row)}<div class="machine-material-label machine-output-label">输出产物</div>${machineOutputsCell(row)}</td><td class="wrap">${machineLabel(row)}<div class="small" style="margin-top:8px"><b>末台${row.duty < 0.999999 ? "平均" : ""}产出：</b>${esc(lastMachineOutputText(row))}</div>${machineClockControl(row)}${sloopControl(row)}</td><td>${row.shards}</td><td>${R[row.k].generation ? "发电 " + fmt(row.outs.Workbench_Electricity || 0) + " MW" : fmt(row.power) + " / " + fmt(row.peak)}</td>${machineBuildCells(row)}</tr>`;
+        return `<tr id="machine-${row.k}" class="${machineIsBuilt(row) ? "machine-built" : ""}"><td class="wrap"><div class="itemhead">${icon(R[row.k].b)}<div>${esc(B[R[row.k].b]?.name)}<br><small>${esc(R[row.k].name)}</small>${row.unlock ? `<div class="small machine-unlock">机器解锁：T${row.unlock.tier} · ${esc(row.unlock.name)}</div>` : ""}${row.flowCycle ? '<div class="badge">循环回流</div>' : ""}${machineIsBuilt(row) ? '<div class="badge" style="margin-top:6px">✓ 已建成</div>' : ""}</div></div>${recipeSelect(main, "recipe-choice")}</td><td class="wrap machine-materials"><div class="machine-material-label">输入材料 · 本组总需求</div>${machineInputsCell(row)}<div class="machine-material-label machine-output-label">输出产物</div>${machineOutputsCell(row)}</td><td class="wrap">${machineLabel(row)}<div class="small" style="margin-top:8px"><b>末台${row.duty < 0.999999 ? "平均" : ""}产出：</b>${esc(lastMachineOutputText(row))}</div>${machineClockControl(row)}${sloopControl(row)}</td><td>${row.shards}</td><td>${R[row.k].generation ? "发电 " + fmt(row.outs.Workbench_Electricity || 0) + " MW" : fmt(row.power) + " / " + fmt(row.peak)}</td>${machineBuildCells(row)}</tr>`;
       })
       .join("") || '<tr><td colspan="7">暂无生产机器。</td></tr>';
   renderSurplusHandling(p);
@@ -10979,6 +11010,11 @@ function init() {
   $("clockNum").onchange = clock;
   $("powerMult").onchange = (e) => {
     state.powerMult = normalizeMultiplier(e.target.value);
+    renderAll();
+  };
+  $("machineSort").value = state.machineSort;
+  $("machineSort").onchange = (e) => {
+    state.machineSort = e.target.value === "flow" ? "flow" : "milestone";
     renderAll();
   };
   $("sort").onchange = (e) => {
