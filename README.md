@@ -1,159 +1,112 @@
-# 幸福工厂产线计算器
+# Satisfactory Production Calculator
 
-**简体中文** | [English](README.en.md)
+**English** | [简体中文](README.zh-CN.md)
 
-面向《Satisfactory》的中英双语产线规划工具。根据资源供给或目标产量，计算生产链、机器配置、物料流量和电力需求，并通过连接图查看上下游关系。
+A bilingual (English / Chinese) production planner for **Satisfactory 1.2**. Plan production chains from the resources you have or the products you want, and get machine counts, clock speeds, material flows, power and byproducts — then inspect the whole factory as an interactive graph.
 
-纯静态网页，无需后端；支持浏览器本地保存和单文件离线使用。
+- **Use it online:** <https://seanz298.github.io/satisfactory-calculator/>
+- **Use it offline:** download `satisfactory-calculator.html` from [Releases](https://github.com/seanz298/satisfactory-calculator/releases) and open it in Chrome, Edge or Firefox.
 
-## 功能
+It is a single static web page: no backend, no account, no installation. Plans are saved in your browser.
 
-| 模块 | 功能 |
+## Features
+
+| Area | What you can do |
 | --- | --- |
-| 产线规划 | 根据供给计算可用产量，或从目标产量反推原料需求；支持单输入约束、锁定产量和替代配方 |
-| 机器配置 | 按上下游顺序排列工序，显示本组输入、输出、机器数量、末台频率及末台产量 |
-| 超频与增产 | 全局及同类机器频率设置、索莫晶体配置、耗电和能量碎片统计 |
-| 发电规划 | 支持多张独立电量目标，统一计算燃料、水、发电量及核废料处理链 |
-| 产线可视化 | 机器卡片画布、网络图与树状图；支持拖动、缩放、全屏和 SVG 导出 |
-| 资源与物流 | 地图资源点、采集设备配置、火车运力及物流容量检查 |
-| 建设与进度 | 机器建材、已建进度、太空电梯和 HUB 里程碑物资跟踪 |
-| 自定义规则 | 耗电、发电量、阶段需求及配方输入消耗倍率 |
-| 数据管理 | 中文／英文切换、方案保存、JSON 导入与导出 |
+| Production planning | Plan forward from supplies, reverse-plan from target products, or limit output by one input; lock targets and pick alternate recipes |
+| Optimal recipes | One click in reverse mode picks the oil and aluminum recipes that use the least crude oil and bauxite |
+| Machines and clocks | Machines sorted by milestone unlock (or flow order), per-machine clocks, Somersloops, Power Shards, and a one-click “fill last machines” that rounds every last machine up to full clock |
+| Byproducts and fluids | Send leftovers to the AWESOME Sink (sinks, power and points are counted), set them as products, or add a downstream product; fluids are packaged into solids; recycle loops show circulation and the cheapest priming point |
+| Power | Several independent power targets, fuel, water, generation and nuclear-waste chains in one balance |
+| Production graph | Network, tree and card-canvas views with zoom, fullscreen, SVG export and manual material links drawn between ports |
+| Sink-point optimizer | Maximize AWESOME Sink points across the whole map with the bundled HiGHS solver, limited to your unlocked alternate recipes |
+| World and logistics | Interactive resource map, extractors, train throughput and belt / pipe capacity checks |
+| Construction and progress | Building materials, built-machine tracking, Space Elevator and HUB milestone requirements |
+| Plans | Save button and Ctrl+S, saved / unsaved indicator, several planner pages open at once (optional), export one plan or all plans as JSON, import and merge |
+| Custom rules | Multipliers for power use, generation, progression costs and recipe inputs |
 
-## 快速开始
+## Quick start
 
-下载或克隆本仓库后，在较新的 Chrome、Edge 或 Firefox 中打开根目录的 `index.html` 即可使用，无需安装依赖。
+1. Open the [online version](https://seanz298.github.io/satisfactory-calculator/), or open `index.html` from this repository in a recent browser.
+2. Add external supplies or resource nodes, or switch the mode to **Reverse: calculate inputs and machines**.
+3. Add final products, choose recipes and set target rates.
+4. Check machines, power and byproducts, then open **Flow and diagrams** to inspect connections.
+5. Press **Save** (Ctrl+S / ⌘S). Use **Export → Export all plans** for a backup.
 
-也可使用本地 HTTP 服务：
+To serve the page locally instead of opening the file:
 
 ```bash
 python3 -m http.server 8000
 ```
 
-浏览器访问 <http://localhost:8000>。
+Then visit <http://localhost:8000>.
 
-### 基本流程
+## Saving, exporting and importing
 
-1. 添加外部供给或资源采集点。
-2. 添加最终产物，选择配方并设置目标产量。
-3. 查看物料平衡、机器配置、耗电与副产物。
-4. 在产线图中检查上下游连接，根据需要调整频率或配方。
-5. 导出 JSON 配置，备份或迁移方案。
+- Plans are saved automatically to `localStorage` in the current browser; nothing is uploaded. The header shows whether the current plan is saved.
+- **Export → Export current plan** writes one plan as `Plan name.json`. **Export all plans** writes every saved plan, the current draft and the existing-factory baseline into one file.
+- **Import and merge** accepts one or more JSON files and appends their plans; name collisions get a numbered suffix. An invalid file cancels the whole batch.
+- The online page, the offline file and each browser keep separate storage. Export and import to move plans between them.
+- Clearing site data deletes saved plans, so keep exported backups of important ones.
+- There are no accounts, cloud saves or real-time collaboration.
 
-需要从目标反推原料时，切换到反推模式；只想限制一种资源时，使用单输入约束模式。
+## Optimizers
 
-## 保存与迁移
+**Optimal oil / aluminum recipes** (reverse mode, section 05): solves all oil recipes (plastic, rubber, polymer resin, heavy oil residue, fuel, petroleum coke, turbofuel) and aluminum recipes (alumina, scrap, ingot, sheet, casing, silica) together. It first minimizes crude oil and bauxite, then the other raw resources weighted by whole-map availability. If unlocked alternates are set in Settings, only those are used. The result can be undone.
 
-方案自动保存在当前浏览器的 localStorage 中，不会自动上传到服务器。
+**Sink-point optimization** (Settings): maximizes sink points for the whole map. You choose the map purity, clock, Somersloop budget, reserved power, time limit and Alien Power Augmenter policy, and can cap raw extraction with the current plan's supplies. It runs the bundled HiGHS WebAssembly solver in a cancellable Web Worker, with no server or network needed. The model uses fixed clocks with integer machine rounding and tail underclocking, so results are optimal for that model, not for continuous clock speeds. The result is previewed first and then saved as a new editable plan.
 
-- 顶栏“保存”（Ctrl+S / ⌘S）把当前编辑写入方案；方案名旁显示“已保存 / 未保存”。
-- 设置里打开“允许同时打开多个产线规划页”后，可以同时开多个方案的规划页，在标签栏切换；“导出全部方案”导出已保存方案和当前页的编辑。
-- “导出 → 导出当前方案”只导出一个方案，文件名为 `方案名称.json`。
-- “方案与改装”页的“导出全部方案”把所有已保存方案、当前编辑和已有产线基准合成一个文件 `全部方案-日期.json`，用“导入并合并”可整批恢复（已有产线基准导入后成为一个改装方案）。
-- 顶部“导出当前方案”包含当前编辑内容；方案列表的“导出方案”导出该行已保存的版本。
-- “导入并合并”支持一次选择多个 JSON，追加方案，不覆盖已有方案、当前编辑或已有产线基准。同名方案自动添加序号。
-- 兼容旧版完整配置及 version 12 单方案。旧配置中的方案和当前草稿会独立合并；同一已保存方案与相同当前快照不重复导入。
-- 一批文件中任一文件无效时，整批不写入；修正后可以重新导入。
-- 单方案包含其产线、机器分组、倍率、替代配方选择及建设进度，不携带其他方案或工作区历史。
-- 本地文件与托管网页的数据不会自动互通，迁移时需导出再导入。
-- 清除浏览器站点数据会删除本地保存，请保留重要方案的备份。
+## Project structure
 
-**当前版本不包含账号、云端保存或双人实时协作。** GitHub Pages 托管本身不会启用这些功能。
-
-## 源码结构
-
-| 路径 | 说明 |
+| Path | Description |
 | --- | --- |
-| `index.html` | 构建后的完整网页，可直接托管或离线打开 |
-| `src/template.html` | 页面结构与构建插入点 |
-| `src/styles.css` | 界面样式 |
-| `src/solver.js` | 线性规划求解器 |
-| `src/app.js` | 产线、机器、发电、地图、阶段、物流及界面逻辑 |
-| `src/plan-files.js` | 单方案格式、文件名、旧格式读取及追加合并 |
-| `src/bootstrap.js` | 内置数据解压与应用启动 |
-| `data/` | 配方、物品、图标、地图及翻译数据 |
-| `scripts/build.py` | 生成单文件网页的构建脚本 |
+| `index.html` | Generated single-file page for hosting or offline use |
+| `src/template.html` | Page structure and build insertion points |
+| `src/styles.css` | Styles |
+| `src/app.js` | Planning, machines, power, graph, map, progression, logistics and plan management |
+| `src/solver.js` | Linear-programming solver used by the planner |
+| `src/plan-files.js` | Plan file export, import and merging |
+| `src/optimizer-core.js`, `src/optimizer-ui.js` | Sink-point optimizer model and interface |
+| `src/bootstrap.js` | Bundled data decompression and startup |
+| `data/` | Recipes, items, icons, map data, optimizer tables and translations |
+| `vendor/highs/` | Pinned HiGHS-JS WebAssembly solver |
+| `scripts/build.py`, `scripts/package.py` | Build the page; package clean sources into `dist/` |
+| `tests/` | Calculation and file-handling tests |
 
-源码采用原生 JavaScript、HTML 和 CSS。`src/app.js` 已格式化，目前仍是单个脚本，尚未拆分为 ES Modules。
+The code is plain JavaScript, HTML and CSS with no framework.
 
-## 开发与构建
+## Development
 
-构建需要 **Python 3.8+**，仅使用标准库，无需 npm 或第三方 Python 依赖。
+Building needs **Python 3.8+** and only the standard library:
 
 ```bash
-python3 scripts/build.py
+python3 scripts/build.py      # Windows: py -3 scripts/build.py
 ```
 
-Windows 可使用：
+After editing `src/` or `data/`, rebuild and commit the generated `index.html`; direct edits to `index.html` are overwritten.
 
-```powershell
-py -3 scripts/build.py
+Tests need **Node.js 18+** and no npm install:
+
+```bash
+for t in tests/*.cjs; do node "$t"; done
 ```
-
-修改 `src/` 或 `data/` 后，重新构建并提交生成的 `index.html`。直接修改 `index.html` 会在下次构建时被覆盖。
 
 ## GitHub Pages
 
-项目可直接作为静态网站发布。在仓库 **Settings → Pages** 中选择 **Deploy from a branch**，再选择 `main` 分支的 **/ (root)** 目录。
+In **Settings → Pages**, choose **Deploy from a branch**, then select `main` and **/ (root)**. `index.html` must stay in the repository root.
 
-发布前确保 `index.html` 位于仓库根目录。私有仓库的 Pages 可用性取决于 GitHub 账号套餐；具体网址和部署状态以仓库 Pages 设置页为准。
+## Limitations
 
-## 当前限制
+- Game data is a bundled snapshot of version 1.2.3.1 and is not updated automatically.
+- Results are steady-state material balances. Startup time, pipe filling and other transient behavior are not simulated.
+- When the optimal oil / aluminum solution mixes two recipes for one item, only the dominant recipe is applied.
 
-- 使用内置游戏数据快照，不会自动获取后续游戏版本更新；数据版本可在页面内查看。
-- 产线连接基于计算结果自动生成，暂不支持以手动连接指定某台工厂的供货来源。
-- 计算结果反映配置中的稳态物料平衡，不模拟启动时间、管道填充和实际运行中的全部瞬态行为。
+## Feedback
 
-## 反馈
+Report bugs and ideas in [Issues](https://github.com/seanz298/satisfactory-calculator/issues). For calculation problems, include the steps to reproduce, the expected result and an exported plan JSON; screenshots help for interface issues.
 
-欢迎通过 [Issues](https://github.com/seanz298/satisfactory-calculator/issues) 提交问题或建议。计算异常请附上复现步骤、预期结果及可公开分享的 JSON 配置；界面问题可附截图。
+## Licensing and acknowledgments
 
-## 许可与致谢
+This project is not affiliated with Coffee Stain Studios. The Satisfactory name, icons, maps and related assets belong to their owners.
 
-本项目不是 Coffee Stain Studios 的官方产品。Satisfactory 名称、游戏图标、地图及相关资源归各自权利人所有。
-
-代码许可证见 [LICENSE](LICENSE)，第三方依赖见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。游戏资源不因代码许可证而改变权属。
-
-## 石油 / 铝最优配方
-
-反推模式下，“05 / 机器与逐台频率”的“石油 / 铝最优配方”会同时比较石油（塑料、橡胶、聚合树脂、重油残渣、燃料、石油焦、涡轮燃油）和铝（氧化铝溶液、碎铝渣、铝锭、复合铝板、铝制外壳、二氧化硅）相关的全部配方，换成原油和铝土矿消耗最少的组合；消耗相同时再让其他原料最少（按全图储量加权）。设置里勾选了已解锁替代配方时只在其中选择。结果可撤销。
-
-## 回收点数优化与已解锁替代配方
-
-设置 → **已解锁替代配方**：搜索中文、英文或拼音，勾选已有配方；可全选或清空。初次使用默认不选择任何替代配方，默认配方始终可用。此列表约束回收优化器，不会自动改写手动产线。选择保存在当前方案中，支持导入、导出、切换方案及撤销重做。
-
-设置 → **常规与回收优化**：
-
-1. 选择原版实际纯度或全高纯度地图。
-2. 设置生产频率、可用晶体（完整研究后的常见值为 103）、预留电力和计算时限。
-3. 可以指定增幅器数量，或自动比较台数与持续供给燃料的组合。
-4. 可勾选使用当前方案的原始资源供给作为额外上限；未填写的原始资源仍受地图上限约束，中间件供给不作为免费原料。
-5. 开始优化，检查最终回收物品与电力结果，然后保存为一个新方案。旧方案仍保留。
-
-求解器在 Web Worker 中运行；可取消计算。单文件已内嵌 HiGHS-JS 与 WebAssembly，**不需要服务器、Python 或联网**。计算时限内可能只找到可行解，界面会区分“设定模型下最优”与“当前最好可行解”。本模型按统一设定的生产频率优化，转换为整数台数＋末台降频；不是连续自由频率的非线性全局最优。
-
-模型包含替代配方选择、晶体整数预算、采矿与抽水耗电、副产物回用、矿物转换、核废料零堆积、真实回收机台数及其 30 MW 耗电。晶体预算含电力增幅器所占的 10 个/座；有燃料的增幅器每座持续消耗异星能量矩阵 5/分。生产低于 1% 的尾机通过按需求运行分组与现有间歇逻辑表示。
-
-发电按平均功率计，额外管道泵、交通和用电波动需要通过预留电力覆盖。以标准 1× 输入/耗电世界规则优化；生成方案的发电倍率表达增幅器效果。采集、抽水与回收机耗电计入额外负载；地热和增幅器本体记为明确的电力供给，勿再重复添加。优化摘要是历史记录，手动改线后应重新优化。
-
-新增源文件：`src/optimizer-core.js`（建模与结果转换）、`src/optimizer-ui.js`（设置、后台线程与保存）、`data/optimization.json`（内置系数）、`vendor/highs/`（固定版本求解器）。许可与来源见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
-
-验证：运行 `node tests/optimizer.cjs`、`node tests/integration.cjs`、`node tests/scenarios.cjs`。测试需要 Node.js 18+，无需 npm 安装。
-
-## 单方案配置与源码整理
-
-导出格式为 `satisfactory-plan`，`configVersion: 1`，字段为 `name`、`kind`、`gameVersion`、`savedAt`、`state`。`state.version` 仍为 12。旧 `satisfactory-workspace` 仅用于兼容导入和浏览器内部持久化。
-
-界面已移除静态小字说明，保留输入标签、数量单位、结果、校验错误和计算状态。计算及回收规则保持不变。
-
-清理了旧版 `preview/index.html`、生成测试方案和失败调试文件；测试改为在内存中生成方案，不再依赖上次运行留下的文件。保留游戏数据、求解器、许可证和模型参考源码。
-
-```bash
-node tests/plan-files.cjs
-node tests/integration.cjs
-node tests/scenarios.cjs
-python3 scripts/build.py
-python3 scripts/package.py
-```
-
-`package.py` 将清洁源码包写入 `dist/`，排除 Git 数据、托管信息、缓存和测试运行残留。本次环境未完成浏览器实测。
+No blanket open-source license has been chosen yet; a public repository does not grant redistribution rights for all content. Third-party components and their licenses are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

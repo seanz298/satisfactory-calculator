@@ -11,7 +11,7 @@ def package():
     output = ROOT / 'dist' / 'satisfactory-calculator-source.zip'
     output.parent.mkdir(exist_ok=True)
     files = [ROOT / name for name in (
-        '.gitignore', '.nojekyll', 'index.html', 'README.md', 'README.en.md',
+        '.gitignore', '.nojekyll', 'index.html', 'README.md', 'README.zh-CN.md',
         'LICENSE', 'THIRD_PARTY_NOTICES.md', 'CHANGELOG.md',
     )]
     extensions = {'.js', '.cjs', '.json', '.css', '.html', '.py', '.wasm'}
