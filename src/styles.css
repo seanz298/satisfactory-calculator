@@ -2800,3 +2800,9 @@ html[lang="en"] .board-caption {
 .app-header details.menu .menu-list button:hover { background: #fff7ed; color: #b45309; }
 @media (max-width: 760px) { .plan-badge { display: none; } }
 @media (max-width: 540px) { .app-header details.menu > summary { padding: 6px; font-size: 11px; } }
+
+/* Multiple planner pages */
+.workspace-tab.planner-doc > button:first-child { font-weight: 500; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-tab .doc-dirty { color: #ea580c; margin-left: 4px; font-weight: 700; }
+.workspace-tabs .tab-add { border: 1px dashed #cbd5e1; background: transparent; color: #64748b; border-radius: 8px; padding: 4px 10px; margin-left: 4px; cursor: pointer; }
+.workspace-tabs .tab-add:hover { border-color: #d97706; color: #b45309; background: #fffaf2; }
