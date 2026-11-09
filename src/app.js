@@ -53,9 +53,48 @@ const BUILDING_UNLOCK = {
   Build_Converter_C: "Schematic_9-1_C",
   Build_QuantumEncoder_C: "Schematic_9-2_C",
 };
+function makePlanUid() {
+  return 'plan-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2,12);
+}
+function livePlanRecords(override = state) {
+  const records = (typeof workshop === 'object' ? workshop.plans : []).map(p => ({id:p.state.planUid,name:p.name,source:true,state:workshop.liveDrafts?.[p.state.planUid] || p.state}));
+  const index = records.findIndex(p => p.id === override.planUid);
+  const active = {id:override.planUid,name:typeof workshop === 'object' ? workshop.active.name : '当前方案',source:index>=0,state:override};
+  if (index >= 0) records[index] = active; else records.push(active);
+  return records;
+}
+function liveExportDemands(s) {
+  return canonicalDemands(Object.fromEntries(s.products.filter(p=>!p.sink && p.q>EPS).map(p=>[p.id,p.q])));
+}
+function evaluateLivePlans(override = state) {
+  const plans=livePlanRecords(override);
+  const signature=JSON.stringify(plans);
+  if(globalThis.__livePlanCache?.signature === signature) return globalThis.__livePlanCache.value;
+  const network={version:1,links:plans.flatMap(p=>(p.state.liveLinks||[]).map(l=>({...l,to:p.id,id:p.id+':'+l.id})))};
+  const value=PlanNetwork.evaluate(plans,network,(snapshot,incoming)=>{
+    const controlled=new Set((snapshot.liveLinks||[]).map(l=>l.item));
+    if([...controlled].some(id=>hasProductMaterial(id,snapshot))) return {ok:false,exports:{},message:'接收物料不能同时作为最终产物'};
+    const effective={...snapshot,_networkResolved:true,supplies:[...snapshot.supplies.filter(x=>!controlled.has(x.id)),...[...controlled].map(id=>({id,q:incoming[id]||0,stop:snapshot.supplies.find(x=>x.id===id)?.stop !== false,network:true}))]};
+    const solution=planSolve(demands(effective),effective,{mode:effective.mode});
+    const plan=summarize(solution,effective);
+    const exports=plan?liveExportDemands(effective):{};
+    if(plan) exports.Workbench_Electricity=Math.max(0,plan.generation+(plan.importedPower||0)-plan.power-(effective.extraLoad||0));
+    return {ok:solution.ok,exports,effective,solution,message:solution.ok?'':'供给、连接或产能不足'};
+  });
+  globalThis.__livePlanCache={signature,value};return value;
+}
+function resolveLiveState(s) {
+  if(s._networkResolved || !(s.liveLinks?.length)) return {state:s};
+  const report=evaluateLivePlans(s),result=report.results.get(s.planUid);
+  if(!result?.effective) return {error:report.errors.filter(e=>e.plan===s.planUid).map(e=>e.message).join('；')||'跨方案来源失效或存在循环依赖'};
+  return {state:result.effective};
+}
+
 function fresh() {
   return {
     version: 12,
+    planUid: makePlanUid(),
+    liveLinks: [],
     supplies: [],
     products: [],
     routing: { enabled: false, edges: [] },
@@ -285,6 +324,7 @@ function generatorWaste(s = state) {
   return {};
 }
 function supplyPool(s = state) {
+  if (!s._networkResolved && s.liveLinks?.length) { const resolved=resolveLiveState(s); if(resolved.state) s=resolved.state; }
   const pool = {};
   for (const x of s.supplies) pool[x.id] = (pool[x.id] || 0) + x.q;
   for (const n of s.nodes) {
@@ -502,6 +542,9 @@ function planSolve(
   s = state,
   { mode = null, target = null, flex = null, limit = null } = {},
 ) {
+  const resolved = resolveLiveState(s);
+  if (resolved.error) return {ok:false, liveError:resolved.error};
+  s = resolved.state;
   mode = mode || s.mode || "forward";
   const cap = mode === "constrained" ? s.inputConstraint : null;
   if (cap && (!I[cap.id]?.selectable || hasProductMaterial(cap.id, s)))
@@ -602,10 +645,11 @@ function planSolve(
     // Raw resources cannot be manufactured, so their supply is never a cap
     // outside forward planning.
     const partial = !I[id]?.raw && s.supplies.some(x => x.id === id && !x.stop);
+    const networkSupply = s.supplies.some(x => x.id === id && x.network);
     const v = { objective: target || flex || partial ? 0 : 1, [id]: 1 };
-    if (mode === "forward" || (cap && id === cap.id) || (partial && mode !== "shortage")) {
+    if (mode === "forward" || (cap && id === cap.id) || (partial && mode !== "shortage") || networkSupply) {
       model.constraints["s:" + id] = {
-        max: cap && id === cap.id ? amount(cap.q) : pool[id] || 0,
+        max: cap && id === cap.id ? (networkSupply ? Math.min(amount(cap.q), pool[id] || 0) : amount(cap.q)) : pool[id] || 0,
       };
       v["s:" + id] = 1;
     }
@@ -618,7 +662,7 @@ function planSolve(
       if (!v) continue;
       v.objective = 0.000001;
       v["use:" + id] = 1;
-      model.variables["short:" + id] = { objective: 1, [id]: 1 };
+      if (!s.supplies.some(x => x.id === id && x.network)) model.variables["short:" + id] = { objective: 1, [id]: 1 };
     }
   }
   if (target || flex) {
@@ -645,6 +689,7 @@ function planSolve(
   if (!result?.feasible || result.bounded === false)
     return { ok: false, unbounded: result?.bounded === false };
   return { ok: true, result, rs, pool, involved: [...involved], mode,
+    effectiveState: s,
     routedEdges: s.routing?.enabled ? s.routing.edges.map((e, i) => ({ ...e, q: result['route-edge:' + i] || 0 })).filter(e => e.q > 1e-6) : null };
 }
 function demands(s = state) {
@@ -706,6 +751,7 @@ function configure(k, eq, s = state) {
 }
 function summarize(solution, s = state) {
   if (!solution.ok) return null;
+  s = solution.effectiveState || s;
   const rows = [],
     external = {},
     surplus = {},
@@ -1845,6 +1891,7 @@ function emptyWorkspace() {
     active: { name: "未命名方案", kind: "new", id: null },
     existing: null,
     plans: [],
+    liveDrafts: {},
     nextId: 1,
     compareId: "existing",
     previous: null,
@@ -1926,17 +1973,29 @@ function normalizeWorkspace(x) {
       },
       state: validSnapshot(x.previous.state),
     };
+  const savedActive=w.plans.find(p=>p.id===w.active.id);
+  if(savedActive && !x.active?.state?.planUid) s.planUid=savedActive.state.planUid;
+  if(new Set(w.plans.map(p=>p.state.planUid)).size!==w.plans.length) throw Error('方案身份重复');
+  for(const p of w.plans) if(x.liveDrafts?.[p.state.planUid]) {
+    const draft=validSnapshot(x.liveDrafts[p.state.planUid]);
+    if(draft.planUid!==p.state.planUid) throw Error('方案草稿身份不匹配');
+    w.liveDrafts[p.state.planUid]=draft;
+  }
   return { w, s };
 }
 function workspacePayload() {
+  const drafts = {...workshop.liveDrafts};
+  if(workshop.plans.some(p=>p.state.planUid===state.planUid)) drafts[state.planUid]=copy(state);
   return {
     ...copy(workshop),
+    liveDrafts: drafts,
     active: { ...copy(workshop.active), state: copy(state) },
     gameVersion: DATA.version,
   };
 }
 function persistWorkspace() {
   if (!workspaceReady) return;
+  if(workshop.plans.some(p=>p.state.planUid===state.planUid)) (workshop.liveDrafts ??= {})[state.planUid]=copy(state);
   recordUndoHistory();
   try {
     localStorage.setItem(WORKSPACE_KEY, JSON.stringify(workspacePayload()));
@@ -1975,7 +2034,7 @@ function loadWorkspace() {
   }
 }
 function exportSinglePlan(plan = null) {
-  const source = plan || { ...workshop.active, state };
+  const source = plan ? {...plan,state:workshop.liveDrafts?.[plan.state.planUid] || plan.state} : { ...workshop.active, state };
   const payload = PlanFiles.payload(source, DATA.version);
   download(PlanFiles.filename(payload.name), JSON.stringify(payload, null, 2));
 }
@@ -1987,7 +2046,7 @@ async function importWorkspaceFile(e) {
       JSON.parse(await file.text()), file.name.replace(/\.json$/i, ''), validSnapshot,
     )));
     const incoming = batches.flat();
-    workshop = PlanFiles.merge(workshop, incoming);
+    workshop = PlanFiles.merge(workshop, incoming, state.planUid);
     workspaceReady = true;
     save();
     renderWorkspace();
@@ -2352,11 +2411,23 @@ function rememberEditing() {
 }
 function loadNamedPlan(p) {
   rememberEditing();
-  state = validSnapshot(p.state);
+  if(workshop.plans.some(p=>p.state.planUid===state.planUid)) (workshop.liveDrafts ??= {})[state.planUid]=copy(state);
+  state = validSnapshot(workshop.liveDrafts?.[p.state.planUid] || p.state);
   workshop.active = { name: p.name, kind: p.kind || "new", id: p.id || null };
   renderAll();
   renderWorkspace();
   setStatus("已载入 " + p.name + "；切换前的编辑可恢复。");
+}
+function removeNamedPlan(id) {
+  const removed = workshop.plans.find(p => p.id === id);
+  if (!removed) return;
+  workshop.plans = workshop.plans.filter(p => p.id !== id);
+  delete workshop.liveDrafts[removed.state.planUid];
+  if (state.planUid === removed.state.planUid) {
+    // Keep the editable content, but retire the deleted supplier's identity.
+    state.planUid = makePlanUid();
+    workshop.active.id = null;
+  }
 }
 function applyExistingProgress() {
   const e = workshop.existing,
@@ -2406,6 +2477,7 @@ function initProjects() {
     const id = workshop.nextId++,
       name = cleanTitle($("activePlanName").value, "方案" + id),
       kind = $("activePlanKind").value;
+    state.planUid = makePlanUid();
     workshop.plans.push({
       id,
       name,
@@ -2495,9 +2567,8 @@ function initProjects() {
       save();
     }
     if (d.deletePlan) {
-      workshop.plans = workshop.plans.filter((p) => p.id !== +d.deletePlan);
-      if (workshop.active.id === +d.deletePlan) workshop.active.id = null;
-      save();
+      removeNamedPlan(+d.deletePlan);
+      renderAll();
       renderWorkspace();
     }
     if (button.id === "loadExisting" && workshop.existing)
@@ -6278,6 +6349,12 @@ function safeState(x) {
     );
   for (const product of x.products || []) ensureProductItem(product.id);
   const s = fresh();
+  s.planUid = typeof x.planUid === 'string' && x.planUid.length <= 100 ? x.planUid : s.planUid;
+  s.liveLinks = Array.isArray(x.liveLinks) ? x.liveLinks.map(l => {
+    if (!l || typeof l.id !== 'string' || typeof l.from !== 'string' || !I[l.item]?.selectable || !Number.isFinite(l.rate) || l.rate < 0 || l.rate > 1e8) throw Error('跨方案连接数据无效');
+    return {id:l.id,from:l.from,item:l.item,rate:l.rate};
+  }) : [];
+  if(new Set(s.liveLinks.map(l=>l.id)).size !== s.liveLinks.length) throw Error('跨方案连接编号重复');
   s.geothermal = normalizeGeothermal(x.geothermal);
   s.optimizationSettings = normalizeOptimizationSettings(x.optimizationSettings);
   s.optimizationReport = x.optimizationReport && Number.isFinite(x.optimizationReport.points) ? copy(x.optimizationReport) : null;
@@ -6525,10 +6602,13 @@ function controls() {
   renderInputConstraint();
 }
 function renderSupplies() {
+  const controlled = new Set((state.liveLinks || []).map(l => l.item));
+  const resolved = resolveLiveState(state);
+  const supplies = [...state.supplies.filter(x=>!controlled.has(x.id)), ...[...controlled].map(id=>({id,q:resolved.state?.supplies.find(x=>x.id===id&&x.network)?.q||0,network:true}))];
   $("supplies").innerHTML =
-    state.supplies
+    supplies
       .map(
-        (x) =>
+        (x) => x.network ? `<div class="card"><b>${esc(I[x.id].name)}</b><p>实时接入 ${fmt(x.q)} ${unit(x.id)}</p><label><input type="checkbox" data-live-continue="${esc(x.id)}" ${state.supplies.some(s=>s.id===x.id&&!s.stop)?"checked":""}> 不足部分继续生产</label><button data-live-open>管理跨方案连接</button></div>` :
           `<div class="card"><div class="top"><div class="itemhead">${icon(x.id)}<div><b>${esc(I[x.id].name)}</b><small style="display:block">${esc(I[x.id].en)}</small></div></div><button data-delsupply="${x.id}" aria-label="移除${esc(I[x.id].name)}">×</button></div><label class="rowfield">${unit(x.id)}<input data-supply="${x.id}" type="number" min="0" max="100000000" step="any" value="${displayNumber(cleanComputedQuantity(x.q))}" ${x.lock ? "disabled" : ""}></label><label><input data-supplylock="${x.id}" type="checkbox" ${x.lock ? "checked" : ""}> 锁定供给数量</label><label class="small"><input data-stop="${x.id}" type="checkbox" ${x.stop ? "checked" : ""}> 作为产线起点，不再制造此物品</label></div>`,
       )
       .join("") || '<div class="empty">尚未添加外部供给</div>';
@@ -6646,6 +6726,7 @@ function machineLabel(row) {
   return a.join(" ＋ ") || "0台";
 }
 function diagnosePlanFailure(s = state, solution = {}) {
+  if(solution.liveError) return {reason:solution.liveError,missing:[],checks:[]};
   if (solution.routingError) return { reason: solution.routingError, missing: [], checks: [] };
   if (s.routing?.enabled && planSolve(demands(s), {...s, routing:{...s.routing, enabled:false}}, {mode:s.mode}).ok)
     return { reason: '手动连接无法满足产线：请检查缺失的输入连接、供给数量或连接端点。', missing: [], checks: [] };
@@ -6781,6 +6862,7 @@ function renderResults() {
   const solution = planSolve(demands(), state, { mode: state.mode });
   current = summarize(solution);
   renderRouting();
+  renderLivePlanLinks();
   dirtyGraph = true;
   graphPreview = null;
   refreshSingleOutput();
@@ -8326,7 +8408,7 @@ initUndoRedo();
 
 let importedSupplySources = [], supplyTransferSources = [], supplyTransferRows = [];
 function supplySourceProducts(sourceState) {
-  const amounts = canonicalDemands(demands(sourceState));
+  const amounts = liveExportDemands(sourceState);
   delete amounts.Workbench_Electricity;
   const plan = summarize(planSolve(demands(sourceState), sourceState, { mode: sourceState.mode }), sourceState);
   // Electricity can be exported only after this plan's own average demand.

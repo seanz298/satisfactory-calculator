@@ -135,3 +135,10 @@ Static explanatory footnotes have been removed; units, controls, calculation sta
 `src/plan-files.js` owns file handling. Old preview builds and generated/failed test snapshots were removed. Tests now create inputs in memory. Runtime data, licenses and model reference source remain.
 
 Run `node tests/plan-files.cjs`, `node tests/integration.cjs`, and `node tests/scenarios.cjs`. Build with `python3 scripts/build.py`; package clean sources with `python3 scripts/package.py` (output: `dist/`). Browser testing was unavailable in this environment.
+
+
+## Live cross-plan links (development branch)
+
+Drag an output port onto a receiving plan in the production graph, or use the connection form. Named source plans share a finite output budget across receivers. Edits recalculate immediately; requests, links and named drafts persist across switches and reloads. Disconnecting restores matching manual supplies. Deleted or unsaved sources cannot supply a link, including when an old draft is restored.
+
+Run `node tests/live-plan-links.cjs`, `node tests/live-link-modes.cjs`, `node tests/plan-network.cjs` and `node tests/live-link-ui.cjs`. Desktop Chromium acceptance was exercised through the actual UI; see [acceptance notes](tests/live-links-acceptance.md). Run `node tests/make-browser-fixture.cjs` after building to create a disposable local acceptance page. Do not publish that fixture.

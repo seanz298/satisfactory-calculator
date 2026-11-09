@@ -98,7 +98,7 @@ py -3 scripts/build.py
 ## 当前限制
 
 - 使用内置游戏数据快照，不会自动获取后续游戏版本更新；数据版本可在页面内查看。
-- 产线连接基于计算结果自动生成，暂不支持以手动连接指定某台工厂的供货来源。
+- 产线连接支持自动生成、手动限制物料流向，以及跨命名方案的实时供货连接。
 - 计算结果反映配置中的稳态物料平衡，不模拟启动时间、管道填充和实际运行中的全部瞬态行为。
 
 ## 反馈
@@ -149,4 +149,18 @@ python3 scripts/build.py
 python3 scripts/package.py
 ```
 
-`package.py` 将清洁源码包写入 `dist/`，排除 Git 数据、托管信息、缓存和测试运行残留。本次环境未完成浏览器实测。
+`package.py` 将清洁源码包写入 `dist/`，排除 Git 数据、托管信息、缓存和测试运行残留。跨方案连接已完成 Chromium 桌面浏览器实测，范围见 `tests/live-links-acceptance.md`。
+
+### 跨方案实时连接（开发分支）
+
+本分支基于新版连接图、流体副产物处理及回流计算继续开发。在“产线连接图 → 跨方案实时连接”可拖动来源物料端口到接收方案卡片，也可使用表单。申请量在连接表调整；总申请超出源产量时按比例分配并显示缺口，分配额度不会重复占用。
+
+来源须保存为命名方案。编辑后自动重算，草稿和连接随本机工作台保存，刷新或切换后保留。实时接入接管同物料的手填供给；断开后恢复手填值。“不足部分继续生产”可继续使用。已标记送入回收器的产物不再计作可外供量。
+
+单方案 JSON 保留来源身份，但不包含其他方案。相关方案分别导入后可恢复依赖；缺少来源时显示错误。批量导入发生身份冲突时，会同步重映射批次内的来源引用。
+
+验证：`node tests/live-plan-links.cjs`、`node tests/plan-network.cjs`、`node tests/live-link-ui.cjs`。真实浏览器验收脚本为 `node tests/browser-live-links.cjs`，需 Playwright 和 Chromium；可用 `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` 指定已安装的 Chromium。DOM 事件测试不等同于浏览器布局及命中测试。
+
+设计参考：比较了 MIT 许可的 [xyflow](https://github.com/xyflow/xyflow)（React/Svelte）与 [BaklavaJS](https://github.com/newcat/baklavajs)（Vue/TypeScript，核心与渲染器分离），两者均超过 500 星。参考其连接验证和计算/渲染分离思路；当前分支继续使用既有原生 SVG，保持离线单文件构建，不引入前端框架或复制项目代码。动态端口位置变化需要重新计算连线，参见 [React Flow 的端口更新说明](https://reactflow.dev/api-reference/hooks/use-update-node-internals)。
+
+浏览器验收可用 `node tests/make-browser-fixture.cjs` 在构建后生成一次性本地验收页面。验收操作和实测范围见 [跨方案连接验收](tests/live-links-acceptance.md)。补充回归运行 `node tests/live-link-modes.cjs`，覆盖继续生产、反推和单输入约束、多级依赖、重复连接和供给锁定。

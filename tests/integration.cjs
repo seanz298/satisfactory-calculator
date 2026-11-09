@@ -4,12 +4,12 @@ function environment(){
  const app=fs.readFileSync(root+'/src/app.js','utf8'),ui=fs.readFileSync(root+'/src/optimizer-ui.js','utf8');
  const context={__factoryBundle:Object.fromEntries(['data','icons','map','terrain','translations','optimization'].map(k=>[k,JSON.parse(fs.readFileSync(root+'/data/'+k+'.json'))])),document:{documentElement:{lang:'zh'},getElementById:()=>null},console,structuredClone};
  vm.createContext(context);
- const functions=[...(app+'\n'+ui).matchAll(/^(?:async )?function [\s\S]*?^}/gm)].map(m=>m[0]).join('\n');
+ const functions=[...(app+'\n'+ui+'\n'+fs.readFileSync(root+'/src/live-plan-links.js','utf8')).matchAll(/^(?:async )?function [\s\S]*?^}/gm)].map(m=>m[0]).join('\n');
  const header=app.slice(0,app.indexOf('function fresh()'));
  const progression=app.slice(app.indexOf('const PROGRESSION ='),app.indexOf('function freshProgress()'));
  const genStart=app.indexOf('const GEN ='),gen=app.slice(genStart,app.indexOf('})();',genStart)+5);
  const maps=app.slice(app.indexOf('const MAP_BY_ID ='),app.indexOf('function freshMap()'));
- vm.runInContext(fs.readFileSync(root+'/src/plan-files.js','utf8')+'\n'+header+'\n'+fs.readFileSync(root+'/src/solver.js','utf8')+'\n'+functions+'\n'+progression+'\n'+gen+'\n'+maps+'\nconst amount=x=>Math.max(0,Math.min(1e8,Number(x)||0));let state=fresh();',context);
+ vm.runInContext(fs.readFileSync(root+'/src/plan-files.js','utf8')+'\n'+fs.readFileSync(root+'/src/plan-network.js','utf8')+'\n'+header+'\n'+fs.readFileSync(root+'/src/solver.js','utf8')+'\n'+functions+'\n'+progression+'\n'+gen+'\n'+maps+'\nconst amount=x=>Math.max(0,Math.min(1e8,Number(x)||0));let state=fresh();',context);
  return context;
 }
 function checkState(s){const c=environment();c.input=s;return vm.runInContext(`(()=>{const s=safeState(input);const forward=planSolve(demands(s),s);const reverse=planSolve(demands(s),s,{mode:'reverse'});const expected=Object.keys(s.machineGroups).flatMap(k=>groupedRecipes(k,s));const missing=expected.filter(k=>!forward.rs?.includes(k));return {forward:forward.ok,reverse:reverse.ok,missing,settings:s.optimizationSettings,report:s.optimizationReport};})()`,c);}
