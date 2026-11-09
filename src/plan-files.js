@@ -40,10 +40,23 @@ const PlanFiles = (() => {
     if (value?.format) throw Error('不支持此配置格式');
     return [entry({name:fallback, state:value})];
   }
-  function merge(workspace, incoming) {
+  function merge(workspace, incoming, activeUid = null) {
     const next = clone(workspace), names = new Set(next.plans.map(p => p.name));
     names.add(next.active.name);
     let id = Math.max(1, next.nextId || 1, ...next.plans.map(p => p.id + 1), (next.active.id || 0) + 1);
+    incoming = clone(incoming);
+    const usedUids = new Set(next.plans.map(p => p.state?.planUid).filter(Boolean));
+    if(next.active?.id == null && next.active?.state?.planUid) usedUids.add(next.active.state.planUid);
+    if(activeUid) usedUids.add(activeUid);
+    const remap = new Map();
+    for (const p of incoming) {
+      const uid = p.state?.planUid;
+      if (!uid) continue;
+      if(usedUids.has(uid)) p.state.planUid='plan-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2,12);
+      usedUids.add(p.state.planUid);
+      if(!remap.has(uid)) remap.set(uid,p.state.planUid);
+    }
+    for (const p of incoming) for(const link of p.state?.liveLinks || []) if(remap.has(link.from)) link.from=remap.get(link.from);
     for (const plan of incoming) {
       const base = title(plan.name); let name = base, suffix = 2;
       while (names.has(name)) name = base.slice(0, 85) + '（导入 ' + suffix++ + '）';
