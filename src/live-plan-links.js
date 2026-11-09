@@ -25,7 +25,7 @@ function renderLivePlanLinks() {
   const records=livePlanRecords(),report=evaluateLivePlans();
   const select=(id,choices)=>{
     const el=$(id),old=el.value;
-    el.innerHTML=choices.map(([v,t])=>`<option value="${esc(v)}">${esc(t)}</option>`).join('');
+    el.innerHTML=choices.map(([v,t])=>`<option ${id!=='liveItem'?'data-no-translate':''} value="${esc(v)}">${esc(t)}</option>`).join('');
     if(choices.some(([v])=>v===old)) el.value=old;
   };
   select('liveFrom',records.map(p=>[p.id,p.name]));
@@ -38,7 +38,7 @@ function renderLivePlanLinks() {
   select('liveItem',items.map(id=>[id,I[id].name]));
   const rows=records.flatMap(p=>(p.state.liveLinks||[]).map(l=>({p,l,a:report.allocations.get(p.id+':'+l.id)})));
   $('livePlanStatus').textContent=rows.length?'源方案编辑后立即重新计算，切换方案和刷新后保留。接入同物料后替代接收方案的手填供给。':'选择来源与接收方案，或从画布输出端口拖到另一张方案卡片。';
-  $('livePlanRows').innerHTML=rows.length?`<div class="tablewrap"><table><thead><tr><th>来源</th><th>接收方案</th><th>物料</th><th>申请 / 分</th><th>分配 / 分</th><th>缺口 / 分</th><th></th></tr></thead><tbody>${rows.map(({p,l,a})=>`<tr><td>${esc(records.find(x=>x.id===l.from)?.name||'来源缺失')}</td><td>${esc(p.name)}</td><td>${esc(I[l.item]?.name||l.item)}</td><td><input aria-label="申请接入量" type="number" min="0" max="100000000" step="any" data-live-rate="${esc(l.id)}" data-live-owner="${esc(p.id)}" value="${displayNumber(l.rate)}"></td><td>${a?fmt(a.actual):'—'}</td><td class="${a?.shortage>EPS?'over':''}">${a?fmt(a.shortage):'—'}</td><td><button data-live-delete="${esc(l.id)}" data-live-owner="${esc(p.id)}">断开</button></td></tr>`).join('')}</tbody></table></div>`:'';
+  $('livePlanRows').innerHTML=rows.length?`<div class="tablewrap"><table><thead><tr><th>来源</th><th>接收方案</th><th>物料</th><th>申请 / 分</th><th>分配 / 分</th><th>缺口 / 分</th><th></th></tr></thead><tbody>${rows.map(({p,l,a})=>`<tr><td ${records.some(x=>x.id===l.from)?'data-no-translate':''}>${esc(records.find(x=>x.id===l.from)?.name||'来源缺失')}</td><td data-no-translate>${esc(p.name)}</td><td>${esc(I[l.item]?.name||l.item)}</td><td><input aria-label="申请接入量" type="number" min="0" max="100000000" step="any" data-live-rate="${esc(l.id)}" data-live-owner="${esc(p.id)}" value="${displayNumber(l.rate)}"></td><td>${a?fmt(a.actual):'—'}</td><td class="${a?.shortage>EPS?'over':''}">${a?fmt(a.shortage):'—'}</td><td><button data-live-delete="${esc(l.id)}" data-live-owner="${esc(p.id)}">断开</button></td></tr>`).join('')}</tbody></table></div>`:'';
   $('livePlanErrors').innerHTML=report.errors.map(e=>`<p class="over">${esc((records.find(p=>p.id===e.plan)?.name||'连接')+'：'+e.message)}</p>`).join('') + records.filter(p=>report.results.get(p.id)?.ok===false).map(p=>`<p class="over">${esc(p.name)}：${esc(report.results.get(p.id).message||'产线不可行')}</p>`).join('');
   const cols=Math.min(3,Math.max(1,records.length)),width=cols*340,height=Math.ceil(records.length/cols)*300;
   let svg=`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" aria-label="跨方案实时供给画布">`;
@@ -51,7 +51,7 @@ function renderLivePlanLinks() {
     const ids=[...new Set([...Object.keys(products),...Object.keys(result?.exports||{})])].filter(id=>I[id]?.selectable && (id!=='Workbench_Electricity' || (result?.exports[id]||0)>EPS));
     // All outputs stay accessible; cards scroll as a group for large plans.
     const h=Math.max(120,70+ids.length*25);pos.h=h;
-    svg+=`<g data-live-target="${esc(p.id)}" transform="translate(${pos.x},${pos.y})"><rect width="290" height="${h}" rx="10" fill="${result?.ok?'#fff':'#fff0ed'}" stroke="#536778"/><text x="12" y="25" fill="#111" font-size="14">${esc(p.name.slice(0,24))}</text><text x="12" y="47" fill="#555" font-size="12">${result?.ok?'可供货':'不可行 / 来源失效'}</text>`;
+    svg+=`<g data-live-target="${esc(p.id)}" transform="translate(${pos.x},${pos.y})"><rect width="290" height="${h}" rx="10" fill="${result?.ok?'#fff':'#fff0ed'}" stroke="#536778"/><text data-no-translate x="12" y="25" fill="#111" font-size="14">${esc(p.name.slice(0,24))}</text><text x="12" y="47" fill="#555" font-size="12">${result?.ok?'可供货':'不可行 / 来源失效'}</text>`;
     ids.forEach((id,j)=>{const py=70+j*25;ports.set(p.id+':'+id,{x:pos.x+290,y:pos.y+py});svg+=`<text x="12" y="${py+4}" font-size="12" fill="#111">${esc(I[id]?.name||id)} ${fmt(result?.exports[id]||0)}/分</text><circle data-live-output="${esc(p.id)}" data-live-item="${esc(id)}" cx="290" cy="${py}" r="8" fill="#198d9c" style="cursor:crosshair;touch-action:none"><title>拖到接收方案</title></circle>`;});svg+='</g>';
   });
   for(const {p,l,a} of rows){const start=ports.get(l.from+':'+l.item),end=positions.get(p.id);if(start&&end)svg+=`<path d="M${start.x} ${start.y} C${start.x+65} ${start.y} ${end.x-40} ${end.y+40} ${end.x} ${end.y+40}" fill="none" stroke="${a?.shortage>EPS?'#c33':'#218c98'}" stroke-width="2" pointer-events="none"><title>${esc(I[l.item]?.name||l.item)} ${a?fmt(a.actual):'—'}/分</title></path>`;}

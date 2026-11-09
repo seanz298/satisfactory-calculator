@@ -13,15 +13,17 @@ const PlanNetwork = (() => {
     const links=normalize(network).links, by=new Map();
     for(const p of plans) { if(by.has(p.id)) throw Error('方案标识重复'); by.set(p.id,p); }
     const results=new Map(), visiting=new Set(), errors=[], allocations=new Map();
+    const label = id => by.get(id)?.name || id;
     function visit(id) {
       if(results.has(id)) return results.get(id);
-      if(visiting.has(id)) throw Error('循环依赖：'+[...visiting,id].join(' → '));
+      if(visiting.has(id)) throw Error('循环依赖：'+[...visiting,id].map(label).join(' → '));
       const plan=by.get(id); if(!plan) throw Error('来源方案不存在：'+id);
       visiting.add(id);
       const incoming={};
       for(const l of links.filter(x=>x.to===id)) {
+        if(by.get(l.from)?.source === false) throw Error('来源方案尚未保存或已删除：'+label(l.from));
         const source=visit(l.from);
-        if(!source.ok) throw Error('来源方案不可行：'+l.from);
+        if(!source.ok) throw Error('来源方案不可行：'+label(l.from));
         const total=links.filter(x=>x.from===l.from&&x.item===l.item).reduce((n,x)=>n+x.rate,0);
         const capacity=Math.max(0,Number(source.exports[l.item])||0);
         const q=total>0?l.rate*Math.min(1,capacity/total):0;

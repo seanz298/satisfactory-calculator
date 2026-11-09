@@ -57,9 +57,9 @@ function makePlanUid() {
   return 'plan-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2,12);
 }
 function livePlanRecords(override = state) {
-  const records = (typeof workshop === 'object' ? workshop.plans : []).map(p => ({id:p.state.planUid,name:p.name,state:workshop.liveDrafts?.[p.state.planUid] || p.state}));
+  const records = (typeof workshop === 'object' ? workshop.plans : []).map(p => ({id:p.state.planUid,name:p.name,source:true,state:workshop.liveDrafts?.[p.state.planUid] || p.state}));
   const index = records.findIndex(p => p.id === override.planUid);
-  const active = {id:override.planUid,name:typeof workshop === 'object' ? workshop.active.name : '当前方案',state:override};
+  const active = {id:override.planUid,name:typeof workshop === 'object' ? workshop.active.name : '当前方案',source:index>=0,state:override};
   if (index >= 0) records[index] = active; else records.push(active);
   return records;
 }
@@ -2418,6 +2418,17 @@ function loadNamedPlan(p) {
   renderWorkspace();
   setStatus("已载入 " + p.name + "；切换前的编辑可恢复。");
 }
+function removeNamedPlan(id) {
+  const removed = workshop.plans.find(p => p.id === id);
+  if (!removed) return;
+  workshop.plans = workshop.plans.filter(p => p.id !== id);
+  delete workshop.liveDrafts[removed.state.planUid];
+  if (state.planUid === removed.state.planUid) {
+    // Keep the editable content, but retire the deleted supplier's identity.
+    state.planUid = makePlanUid();
+    workshop.active.id = null;
+  }
+}
 function applyExistingProgress() {
   const e = workshop.existing,
     b = constructionPlan();
@@ -2556,9 +2567,8 @@ function initProjects() {
       save();
     }
     if (d.deletePlan) {
-      workshop.plans = workshop.plans.filter((p) => p.id !== +d.deletePlan);
-      if (workshop.active.id === +d.deletePlan) workshop.active.id = null;
-      save();
+      removeNamedPlan(+d.deletePlan);
+      renderAll();
       renderWorkspace();
     }
     if (button.id === "loadExisting" && workshop.existing)

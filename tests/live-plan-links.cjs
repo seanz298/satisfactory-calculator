@@ -33,4 +33,15 @@ c.saved=JSON.parse(get('JSON.stringify(workspacePayload())'));
 get("const restoredAgain=normalizeWorkspace(saved);workshop=restoredAgain.w;state=workshop.plans.find(p=>p.state.planUid==='b').state");
 assert.equal(get("evaluateLivePlans().allocations.get('b:ab').actual"),42);
 assert.equal(get('planSolve(demands(),state).ok'),false);
+// Removing the active supplier must not keep supplying via its editable draft.
+get("state=JSON.parse(JSON.stringify(workshop.plans[0].state));workshop.active={id:1,name:'source'};removeNamedPlan(1)");
+assert.notEqual(get('state.planUid'),'a');
+assert.equal(get("workshop.liveDrafts.a"),undefined);
+assert.equal(get("evaluateLivePlans().results.get('b')?.ok"),undefined);
+assert(get("evaluateLivePlans().errors.some(e=>e.plan==='b' && e.message.includes('来源方案不存在'))"));
+c.saved=JSON.parse(get('JSON.stringify(workspacePayload())'));
+get('const afterDelete=normalizeWorkspace(saved);workshop=afterDelete.w;state=afterDelete.s');
+assert(get("evaluateLivePlans().errors.some(e=>e.plan==='b')"),'deleted source remains missing after reload');
+get("state.planUid='a'");
+assert(get("evaluateLivePlans().errors.some(e=>e.plan==='b' && e.message.includes('已删除'))"),'restoring an old draft cannot resurrect a deleted supplier');
 console.log('Actual solver: finite live inputs, real-time source edits, reverse limits, cycle rollback, persistence, deletion and import identity PASS');
