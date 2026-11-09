@@ -2052,6 +2052,12 @@ function loadWorkspace() {
     );
   }
 }
+function exportAllPlans() {
+  const payload = PlanFiles.workspacePayload(workshop, state, DATA.version),
+    stamp = new Date().toISOString().slice(0, 10);
+  download(PlanFiles.filename("全部方案-" + stamp), JSON.stringify(payload, null, 2));
+  setStatus(`已导出 ${payload.plans.length} 个已保存方案${payload.active ? "和当前编辑" : ""}${payload.existing ? "、已有产线基准" : ""}。用“导入并合并”可整批恢复。`);
+}
 function exportSinglePlan(plan = null) {
   const source = plan || { ...workshop.active, state };
   const payload = PlanFiles.payload(source, DATA.version);
@@ -2551,6 +2557,7 @@ function initProjects() {
     save();
   };
   $("exportConfig").onclick = () => exportSinglePlan();
+  $("exportAll").onclick = exportAllPlans;
   document.addEventListener("click", (e) => {
     const button = e.target.closest("button");
     if (!button) return;
@@ -8020,6 +8027,7 @@ Object.assign(EN_UI, {
   "自动生成连接，不限制物料流向。": "Links are generated automatically; material flow is not restricted.",
   "手动连接参与物料计算；未连接的工序不会自动供料。": "Manual links constrain the calculation; unlinked steps receive no material.",
   "较多：只标注需并行的线路，其余悬停查看流量。": "many: only parallel lines are labeled; hover for the rest.",
+  "导出全部方案": "Export all plans",
   "按里程碑解锁": "By milestone unlock", "按产线上下游": "By flow order", "排序": "Sort", "回收站": "Sink",
 });
 const languagePattern = new RegExp(

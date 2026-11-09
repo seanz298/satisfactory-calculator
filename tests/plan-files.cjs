@@ -44,3 +44,18 @@ env.event={target:{files:[{name:'valid.json',text:async()=>JSON.stringify(output
   assert.match(env.lastStatus,/已合并 1/);
   console.log('Single-plan export, safe filenames, legacy merge, collisions and atomic import PASS');
 })().catch(error=>{console.error(error);process.exitCode=1});
+{
+ // Export all: saved plans + current draft + baseline round-trip through read().
+ const draft=vm.runInContext('(()=>{const s=fresh();s.products=[{id:"Desc_IronPlate_C",q:5,lock:true}];return s})()',env);
+ const ws={active:{id:1,name:'全图富矿',kind:'new'},plans:[{id:1,name:'全图富矿',kind:'new',savedAt:'2026-11-08T00:00:00Z',state},{id:2,name:'改装',kind:'retrofit',savedAt:'',state}],existing:{name:'基准',state,inventory:{}}};
+ const all=files.workspacePayload(ws,draft,'1.2');
+ assert.equal(all.format,'satisfactory-workspace'); assert.equal(all.plans.length,2); assert.ok(all.active && all.existing);
+ const back=files.read(JSON.parse(JSON.stringify(all)),'全部方案',validate);
+ assert.deepEqual(back.map(p=>p.name),['全图富矿','改装','全图富矿','基准']);
+ assert.equal(back[1].kind,'retrofit'); assert.equal(back[3].kind,'retrofit');
+ // Unchanged draft is not duplicated.
+ const same=files.read(JSON.parse(JSON.stringify(files.workspacePayload(ws,state,'1.2'))),'x',validate);
+ assert.equal(same.length,3);
+ assert.throws(()=>files.workspacePayload({plans:[{name:'坏',state:{version:1}}]},null,'1.2'));
+ console.log('Export all plans round-trips through import PASS');
+}

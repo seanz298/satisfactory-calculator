@@ -12,6 +12,17 @@ const PlanFiles = (() => {
     if (!plan?.state || plan.state.version !== 12) throw Error('方案内容无效');
     return {format:'satisfactory-plan', configVersion:1, gameVersion, name:title(plan.name), kind:plan.kind === 'retrofit' ? 'retrofit' : 'new', savedAt:new Date().toISOString(), state:clone(plan.state)};
   }
+  // All saved plans plus the current draft in one file; read() merges it back.
+  function workspacePayload(workspace, activeState, gameVersion) {
+    const plans = (workspace.plans || []).map(p => {
+      if (!p?.state || p.state.version !== 12) throw Error('方案内容无效：' + title(p?.name));
+      return {id:p.id, name:title(p.name), kind:p.kind === 'retrofit' ? 'retrofit' : 'new', savedAt:typeof p.savedAt === 'string' ? p.savedAt : '', state:clone(p.state)};
+    });
+    const out = {format:'satisfactory-workspace', configVersion:1, gameVersion, exportedAt:new Date().toISOString(), plans};
+    if (activeState?.version === 12) out.active = {id:workspace.active?.id ?? null, name:title(workspace.active?.name, '当前编辑'), kind:workspace.active?.kind === 'retrofit' ? 'retrofit' : 'new', state:clone(activeState)};
+    if (workspace.existing?.state?.version === 12) out.existing = {name:title(workspace.existing.name, '已有产线'), state:clone(workspace.existing.state)};
+    return out;
+  }
   function read(value, fallback, validate) {
     const entry = p => {
       if (!p || typeof p !== 'object') throw Error('方案条目无效');
@@ -53,6 +64,6 @@ const PlanFiles = (() => {
     next.nextId = id;
     return next;
   }
-  return {filename, payload, read, merge};
+  return {filename, payload, workspacePayload, read, merge};
 })();
 if (typeof module === 'object' && module.exports) module.exports = PlanFiles;

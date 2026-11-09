@@ -123,7 +123,8 @@ Checks (Node.js 18+, no npm install): `node tests/optimizer.cjs`, `node tests/in
 
 ## Plan files and importing
 
-- Export one plan at a time as `Plan name.json`; whole-workspace export is no longer available.
+- “Export current plan” saves one plan as `Plan name.json`.
+- “Export all plans” on the Plans page saves every saved plan, the current draft and the existing-factory baseline into one file; “Import and merge” restores them in one go (the baseline comes back as a retrofit plan).
 - The header exports the current draft. Each saved-plan row exports that saved snapshot.
 - Import accepts multiple JSON files and appends their plans without replacing the active draft, existing plans or baseline. Name collisions receive a numbered suffix.
 - Legacy workspace and version-12 state files are supported. Identical active/saved snapshots are deduplicated within a legacy file; differing unsaved drafts are preserved.
