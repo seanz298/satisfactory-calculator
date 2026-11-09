@@ -3262,7 +3262,7 @@ html[lang="en"] .board-caption {
         <div class="panel">
           <div class="toolbar">
             <h2>方案与配置文件</h2>
-            <button id="exportConfig">导出当前方案</button>
+            <div class="buttons"><button id="exportConfig">导出当前方案</button><button id="exportAll" title="已保存方案、当前编辑和已有产线基准合成一个 JSON 文件">导出全部方案</button></div>
           </div>
           <div class="formgrid">
             <label
@@ -3860,6 +3860,17 @@ const PlanFiles = (() => {
     if (!plan?.state || plan.state.version !== 12) throw Error('方案内容无效');
     return {format:'satisfactory-plan', configVersion:1, gameVersion, name:title(plan.name), kind:plan.kind === 'retrofit' ? 'retrofit' : 'new', savedAt:new Date().toISOString(), state:clone(plan.state)};
   }
+  // All saved plans plus the current draft in one file; read() merges it back.
+  function workspacePayload(workspace, activeState, gameVersion) {
+    const plans = (workspace.plans || []).map(p => {
+      if (!p?.state || p.state.version !== 12) throw Error('方案内容无效：' + title(p?.name));
+      return {id:p.id, name:title(p.name), kind:p.kind === 'retrofit' ? 'retrofit' : 'new', savedAt:typeof p.savedAt === 'string' ? p.savedAt : '', state:clone(p.state)};
+    });
+    const out = {format:'satisfactory-workspace', configVersion:1, gameVersion, exportedAt:new Date().toISOString(), plans};
+    if (activeState?.version === 12) out.active = {id:workspace.active?.id ?? null, name:title(workspace.active?.name, '当前编辑'), kind:workspace.active?.kind === 'retrofit' ? 'retrofit' : 'new', state:clone(activeState)};
+    if (workspace.existing?.state?.version === 12) out.existing = {name:title(workspace.existing.name, '已有产线'), state:clone(workspace.existing.state)};
+    return out;
+  }
   function read(value, fallback, validate) {
     const entry = p => {
       if (!p || typeof p !== 'object') throw Error('方案条目无效');
@@ -3901,7 +3912,7 @@ const PlanFiles = (() => {
     next.nextId = id;
     return next;
   }
-  return {filename, payload, read, merge};
+  return {filename, payload, workspacePayload, read, merge};
 })();
 if (typeof module === 'object' && module.exports) module.exports = PlanFiles;
 
@@ -6095,6 +6106,12 @@ function loadWorkspace() {
     );
   }
 }
+function exportAllPlans() {
+  const payload = PlanFiles.workspacePayload(workshop, state, DATA.version),
+    stamp = new Date().toISOString().slice(0, 10);
+  download(PlanFiles.filename("全部方案-" + stamp), JSON.stringify(payload, null, 2));
+  setStatus(`已导出 ${payload.plans.length} 个已保存方案${payload.active ? "和当前编辑" : ""}${payload.existing ? "、已有产线基准" : ""}。用“导入并合并”可整批恢复。`);
+}
 function exportSinglePlan(plan = null) {
   const source = plan || { ...workshop.active, state };
   const payload = PlanFiles.payload(source, DATA.version);
@@ -6594,6 +6611,7 @@ function initProjects() {
     save();
   };
   $("exportConfig").onclick = () => exportSinglePlan();
+  $("exportAll").onclick = exportAllPlans;
   document.addEventListener("click", (e) => {
     const button = e.target.closest("button");
     if (!button) return;
@@ -12063,6 +12081,7 @@ Object.assign(EN_UI, {
   "自动生成连接，不限制物料流向。": "Links are generated automatically; material flow is not restricted.",
   "手动连接参与物料计算；未连接的工序不会自动供料。": "Manual links constrain the calculation; unlinked steps receive no material.",
   "较多：只标注需并行的线路，其余悬停查看流量。": "many: only parallel lines are labeled; hover for the rest.",
+  "导出全部方案": "Export all plans",
   "按里程碑解锁": "By milestone unlock", "按产线上下游": "By flow order", "排序": "Sort", "回收站": "Sink",
 });
 const languagePattern = new RegExp(
