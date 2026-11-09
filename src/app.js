@@ -2038,7 +2038,17 @@ function initEnhancements() {
   };
 }
 
-const WORKSPACE_KEY = "factory-workspace-12",
+// Pages sites of one GitHub user share an origin, so the key includes the
+// page path; the legacy shared key is read once as a fallback.
+const LEGACY_WORKSPACE_KEY = "factory-workspace-12",
+  WORKSPACE_KEY = (() => {
+    try {
+      const path = location.protocol === "file:" ? "" : location.pathname.replace(/[^/]*$/, "");
+      return path && path !== "/" ? LEGACY_WORKSPACE_KEY + ":" + path : LEGACY_WORKSPACE_KEY;
+    } catch {
+      return LEGACY_WORKSPACE_KEY;
+    }
+  })(),
   BELTS = [60, 120, 270, 480, 780, 1200];
 function emptyWorkspace() {
   return {
@@ -2138,15 +2148,61 @@ function workspacePayload() {
     gameVersion: DATA.version,
   };
 }
+// Saved / unsaved indicator in the header.
+// Compare normalised snapshots so formatting-only differences (e.g. a plan
+// synced from another tab) do not count as edits.
+const canonicalCache = new WeakMap();
+function canonicalState(x) {
+  if (x && typeof x === "object" && canonicalCache.has(x)) return canonicalCache.get(x);
+  let text;
+  try {
+    text = JSON.stringify(safeState(JSON.parse(JSON.stringify(x))));
+  } catch {
+    text = JSON.stringify(x);
+  }
+  if (x && typeof x === "object") canonicalCache.set(x, text);
+  return text;
+}
+function activePlanDirty() {
+  const p = workshop.plans.find((x) => x.id === workshop.active?.id);
+  if (!p) return true;
+  const raw = JSON.stringify(state);
+  return raw !== JSON.stringify(p.state) && JSON.stringify(safeState(JSON.parse(raw))) !== canonicalState(p.state);
+}
+function updatePlanBadge() {
+  const el = $("planBadge");
+  if (!el) return;
+  const named = workshop.plans.some((x) => x.id === workshop.active?.id),
+    dirty = activePlanDirty();
+  el.className = "plan-badge" + (saveProblem ? " error" : dirty ? " dirty" : " clean");
+  el.textContent = (named ? workshop.active.name : "未命名方案") + (saveProblem ? " · 浏览器保存失败" : dirty ? " · 未保存" : " · 已保存");
+  el.title = named ? (dirty ? "有修改尚未写入该方案，点“保存”或按 Ctrl+S" : "与已保存的方案一致") : "当前编辑尚未保存为方案，点“保存”或按 Ctrl+S";
+}
+function quickSave() {
+  const named = workshop.plans.some((x) => x.id === workshop.active?.id);
+  if (named) {
+    if (!activePlanDirty()) return setStatus(`“${workshop.active.name}”已是最新，无需保存。`);
+    $("updatePlan").click();
+    return setStatus(`已保存：${workshop.active.name}`);
+  }
+  const fallback = "方案" + workshop.nextId;
+  $("activePlanName").value = workshop.active?.name && workshop.active.name !== "未命名方案" ? workshop.active.name : fallback;
+  $("saveNewPlan").click();
+  setStatus(`已保存为新方案：${workshop.active.name}。可在“方案与改装”页改名。`);
+}
 function persistWorkspace() {
   if (!workspaceReady) return;
   recordUndoHistory();
+  const hadProblem = saveProblem;
   try {
     localStorage.setItem(WORKSPACE_KEY, JSON.stringify(workspacePayload()));
     saveProblem = false;
   } catch {
     saveProblem = true;
   }
+  if (saveProblem && !hadProblem)
+    setTimeout(() => setStatus("浏览器存储已满或被禁用，修改没有保存到浏览器。请先用“导出 → 导出全部方案”备份。", true), 0);
+  updatePlanBadge();
   if ($("storageStatus"))
     $("storageStatus").textContent = saveProblem
       ? "浏览器保存失败，请导出配置文件。"
@@ -2154,7 +2210,7 @@ function persistWorkspace() {
 }
 function loadWorkspace() {
   try {
-    const raw = localStorage.getItem(WORKSPACE_KEY);
+    const raw = localStorage.getItem(WORKSPACE_KEY) ?? (WORKSPACE_KEY !== LEGACY_WORKSPACE_KEY ? localStorage.getItem(LEGACY_WORKSPACE_KEY) : null);
     if (raw) {
       const { w, s } = normalizeWorkspace(JSON.parse(raw));
       workshop = w;
@@ -2683,6 +2739,38 @@ function initProjects() {
   };
   $("exportConfig").onclick = () => exportSinglePlan();
   $("exportAll").onclick = exportAllPlans;
+  $("savePlan").onclick = quickSave;
+  $("exportAllHeader").onclick = () => {
+    $("exportMenu").open = false;
+    exportAllPlans();
+  };
+  document.addEventListener("keydown", (e) => {
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "s") {
+      e.preventDefault();
+      quickSave();
+    }
+  });
+  document.addEventListener("click", (e) => {
+    if ($("exportMenu").open && !e.target.closest("#exportMenu")) $("exportMenu").open = false;
+  });
+  // Another tab saved: take its plan list, keep this tab's current edit.
+  window.addEventListener("storage", (e) => {
+    if (e.key !== WORKSPACE_KEY || !e.newValue || !workspaceReady) return;
+    try {
+      const { w } = normalizeWorkspace(JSON.parse(e.newValue)),
+        changed = JSON.stringify(w.plans.map((p) => [p.id, p.name, p.savedAt])) !== JSON.stringify(workshop.plans.map((p) => [p.id, p.name, p.savedAt]));
+      // Never write back here: two tabs answering each other would loop.
+      if (!changed) return;
+      workshop.plans = w.plans;
+      workshop.nextId = Math.max(workshop.nextId, w.nextId);
+      workshop.existing = w.existing;
+      if (!workshop.plans.some((p) => p.id === workshop.active?.id) && workshop.active?.id)
+        workshop.active = { ...workshop.active, id: null };
+      updatePlanBadge();
+      if (!$("workspaceTab").hidden) renderWorkspace();
+      setStatus("另一个标签页修改了已保存方案，已同步到这里；当前编辑保留。");
+    } catch {}
+  });
   document.addEventListener("click", (e) => {
     const button = e.target.closest("button");
     if (!button) return;
@@ -7475,8 +7563,11 @@ function download(name, body, type = "application/json") {
     a = document.createElement("a");
   a.href = url;
   a.download = name;
+  a.style.display = "none";
+  document.body.appendChild(a);
   a.click();
-  setTimeout(() => URL.revokeObjectURL(url), 2000);
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
 }
 function init() {
   loadWorkspace();
@@ -7772,7 +7863,10 @@ function init() {
         "image/svg+xml",
       );
   };
-  $("export").onclick = () => exportSinglePlan();
+  $("export").onclick = () => {
+    $("exportMenu").open = false;
+    exportSinglePlan();
+  };
   $("import").onclick = () => $("importFile").click();
   $("importFile").onchange = importWorkspaceFile;
   $("reset").onclick = () => {
@@ -8164,6 +8258,8 @@ Object.assign(EN_UI, {
   "手动连接参与物料计算；未连接的工序不会自动供料。": "Manual links constrain the calculation; unlinked steps receive no material.",
   "较多：只标注需并行的线路，其余悬停查看流量。": "many: only parallel lines are labeled; hover for the rest.",
   "导出全部方案": "Export all plans",
+  "未命名方案": "Untitled plan", " · 未保存": " · unsaved", " · 已保存": " · saved", " · 浏览器保存失败": " · browser save failed",
+  "导出当前方案": "Export current plan", "导出": "Export", "导入并合并": "Import & merge", "保存": "Save",
   "石油 / 铝最优配方": "Optimal oil / aluminum recipes",
   "按里程碑解锁": "By milestone unlock", "按产线上下游": "By flow order", "排序": "Sort", "回收站": "Sink",
 });
@@ -8520,7 +8616,7 @@ function initUndoRedo() {
   const redo = document.createElement('button');
   redo.id = 'redoAction'; redo.textContent = '↷ 重做'; redo.title = '重做（Ctrl+Y / Ctrl+Shift+Z / ⌘Shift+Z）';
   redo.setAttribute('aria-keyshortcuts', 'Control+Y Control+Shift+Z Meta+Shift+Z');
-  $('export').before(undo, redo);
+  ($('planBadge') || $('export')).before(undo, redo);
   undo.onclick = () => restoreUndoHistory('undo');
   redo.onclick = () => restoreUndoHistory('redo');
   document.addEventListener('input', event => {
@@ -8778,3 +8874,14 @@ initMachineGroups();
 initRouting();
 
 initSurplusHandling();
+
+// Startup: say what was restored instead of the blank-plan hint.
+setTimeout(() => {
+  updatePlanBadge();
+  if (!workspaceReady) return;
+  const named = workshop.plans.some((p) => p.id === workshop.active?.id),
+    hasContent = state.products.length || state.supplies.length || state.nodes.length;
+  if (named)
+    setStatus(`已恢复上次编辑：${workshop.active.name}${activePlanDirty() ? "（有未保存修改，点“保存”或按 Ctrl+S 写入方案）" : ""}`);
+  else if (hasContent) setStatus("已恢复上次未保存的编辑。点“保存”或按 Ctrl+S 保存为方案。");
+}, 0);
