@@ -22,7 +22,9 @@
       <div class="buttons">
         <button id="fullscreenToggle" title="全屏">全屏</button
         ><button id="densityToggle" title="切换紧凑布局">紧凑</button
-        ><button id="export">导出当前方案</button
+        ><span id="planBadge" class="plan-badge"></span
+        ><button id="savePlan" class="primary" title="保存当前编辑（Ctrl+S）">保存</button
+        ><details id="exportMenu" class="menu"><summary>导出</summary><div class="menu-list"><button id="export">导出当前方案</button><button id="exportAllHeader">导出全部方案</button></div></details
         ><button id="import">导入并合并</button
         ><input id="importFile" type="file" accept=".json" multiple hidden /><button
           id="reset"

@@ -2793,6 +2793,27 @@ html[lang="en"] .board-caption {
 #surplus .fluid-advice ol { margin: 4px 0 0; padding-left: 18px; }
 #surplus .fluid-advice li { margin: 2px 0; }
 
+/* Header save state and export menu */
+.plan-badge { display: inline-flex; align-items: center; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; padding: 5px 10px; border-radius: 999px; border: 1px solid #e2e8f0; color: #475569; background: #f8fafc; }
+.plan-badge.clean { color: #166534; border-color: #bbf7d0; background: #f0fdf4; }
+.plan-badge.dirty { color: #9a3412; border-color: #fed7aa; background: #fff7ed; }
+.plan-badge.error { color: #b91c1c; border-color: #fecaca; background: #fef2f2; }
+.app-header details.menu { position: relative; display: inline-block; }
+.app-header details.menu > summary { list-style: none; cursor: pointer; padding: 7px 10px; border: 1px solid #d8dee6; border-radius: 8px; background: #fff; font-size: 12px; line-height: 1.25; }
+.app-header details.menu > summary::-webkit-details-marker { display: none; }
+.app-header details.menu > summary::after { content: " ▾"; color: #94a3b8; }
+.app-header details.menu .menu-list { position: absolute; right: 0; top: calc(100% + 6px); z-index: 50; display: flex; flex-direction: column; min-width: 150px; padding: 6px; background: #fff; border: 1px solid #e2e8f0; border-radius: 10px; box-shadow: 0 10px 24px rgba(15, 23, 42, 0.12); }
+.app-header details.menu .menu-list button { border: 0; background: transparent; text-align: left; padding: 8px 10px; border-radius: 6px; }
+.app-header details.menu .menu-list button:hover { background: #fff7ed; color: #b45309; }
+@media (max-width: 760px) { .plan-badge { display: none; } }
+@media (max-width: 540px) { .app-header details.menu > summary { padding: 6px; font-size: 11px; } }
+
+/* Multiple planner pages */
+.workspace-tab.planner-doc > button:first-child { font-weight: 500; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-tab .doc-dirty { color: #ea580c; margin-left: 4px; font-weight: 700; }
+.workspace-tabs .tab-add { border: 1px dashed #cbd5e1; background: transparent; color: #64748b; border-radius: 8px; padding: 4px 10px; margin-left: 4px; cursor: pointer; }
+.workspace-tabs .tab-add:hover { border-color: #d97706; color: #b45309; background: #fffaf2; }
+
 </style>
   </head>
   <body>
@@ -2811,7 +2832,9 @@ html[lang="en"] .board-caption {
       <div class="buttons">
         <button id="fullscreenToggle" title="全屏">全屏</button
         ><button id="densityToggle" title="切换紧凑布局">紧凑</button
-        ><button id="export">导出当前方案</button
+        ><span id="planBadge" class="plan-badge"></span
+        ><button id="savePlan" class="primary" title="保存当前编辑（Ctrl+S）">保存</button
+        ><details id="exportMenu" class="menu"><summary>导出</summary><div class="menu-list"><button id="export">导出当前方案</button><button id="exportAllHeader">导出全部方案</button></div></details
         ><button id="import">导入并合并</button
         ><input id="importFile" type="file" accept=".json" multiple hidden /><button
           id="reset"
@@ -6092,7 +6115,17 @@ function initEnhancements() {
   };
 }
 
-const WORKSPACE_KEY = "factory-workspace-12",
+// Pages sites of one GitHub user share an origin, so the key includes the
+// page path; the legacy shared key is read once as a fallback.
+const LEGACY_WORKSPACE_KEY = "factory-workspace-12",
+  WORKSPACE_KEY = (() => {
+    try {
+      const path = location.protocol === "file:" ? "" : location.pathname.replace(/[^/]*$/, "");
+      return path && path !== "/" ? LEGACY_WORKSPACE_KEY + ":" + path : LEGACY_WORKSPACE_KEY;
+    } catch {
+      return LEGACY_WORKSPACE_KEY;
+    }
+  })(),
   BELTS = [60, 120, 270, 480, 780, 1200];
 function emptyWorkspace() {
   return {
@@ -6105,6 +6138,10 @@ function emptyWorkspace() {
     nextId: 1,
     compareId: "existing",
     previous: null,
+    // Planner pages when several are open: the active page's state is the
+    // live `state` (stored as null here); others keep their own draft.
+    plannerTabs: [],
+    activeTabKey: "main",
   };
 }
 let workshop = emptyWorkspace(),
@@ -6183,6 +6220,28 @@ function normalizeWorkspace(x) {
       },
       state: validSnapshot(x.previous.state),
     };
+  w.activeTabKey = typeof x.activeTabKey === "string" && x.activeTabKey ? x.activeTabKey.slice(0, 60) : "main";
+  const keys = new Set();
+  for (const t of Array.isArray(x.plannerTabs) ? x.plannerTabs.slice(0, 30) : []) {
+    const key = typeof t?.key === "string" ? t.key.slice(0, 60) : "";
+    if (!key || keys.has(key)) continue;
+    const isActive = key === w.activeTabKey;
+    let tabState = null;
+    if (!isActive) {
+      try { tabState = validSnapshot(t.state); } catch { continue; }
+    }
+    keys.add(key);
+    w.plannerTabs.push({
+      key,
+      active: isActive ? copy(w.active) : {
+        name: cleanTitle(t.active?.name, "未命名方案"),
+        kind: t.active?.kind === "retrofit" ? "retrofit" : "new",
+        id: Number.isInteger(t.active?.id) ? t.active.id : null,
+      },
+      state: tabState,
+    });
+  }
+  if (!keys.has(w.activeTabKey)) w.plannerTabs.unshift({ key: w.activeTabKey, active: copy(w.active), state: null });
   return { w, s };
 }
 function workspacePayload() {
@@ -6192,15 +6251,62 @@ function workspacePayload() {
     gameVersion: DATA.version,
   };
 }
+// Saved / unsaved indicator in the header.
+// Compare normalised snapshots so formatting-only differences (e.g. a plan
+// synced from another tab) do not count as edits.
+const canonicalCache = new WeakMap();
+function canonicalState(x) {
+  if (x && typeof x === "object" && canonicalCache.has(x)) return canonicalCache.get(x);
+  let text;
+  try {
+    text = JSON.stringify(safeState(JSON.parse(JSON.stringify(x))));
+  } catch {
+    text = JSON.stringify(x);
+  }
+  if (x && typeof x === "object") canonicalCache.set(x, text);
+  return text;
+}
+function activePlanDirty() {
+  const p = workshop.plans.find((x) => x.id === workshop.active?.id);
+  if (!p) return true;
+  const raw = JSON.stringify(state);
+  return raw !== JSON.stringify(p.state) && JSON.stringify(safeState(JSON.parse(raw))) !== canonicalState(p.state);
+}
+function updatePlanBadge() {
+  const el = $("planBadge");
+  if (!el) return;
+  const named = workshop.plans.some((x) => x.id === workshop.active?.id),
+    dirty = activePlanDirty();
+  el.className = "plan-badge" + (saveProblem ? " error" : dirty ? " dirty" : " clean");
+  el.textContent = (named ? workshop.active.name : "未命名方案") + (saveProblem ? " · 浏览器保存失败" : dirty ? " · 未保存" : " · 已保存");
+  el.title = named ? (dirty ? "有修改尚未写入该方案，点“保存”或按 Ctrl+S" : "与已保存的方案一致") : "当前编辑尚未保存为方案，点“保存”或按 Ctrl+S";
+  if (interfaceState?.multiPlanner && interfaceReady) renderTabBar();
+}
+function quickSave() {
+  const named = workshop.plans.some((x) => x.id === workshop.active?.id);
+  if (named) {
+    if (!activePlanDirty()) return setStatus(`“${workshop.active.name}”已是最新，无需保存。`);
+    $("updatePlan").click();
+    return setStatus(`已保存：${workshop.active.name}`);
+  }
+  const fallback = "方案" + workshop.nextId;
+  $("activePlanName").value = workshop.active?.name && workshop.active.name !== "未命名方案" ? workshop.active.name : fallback;
+  $("saveNewPlan").click();
+  setStatus(`已保存为新方案：${workshop.active.name}。可在“方案与改装”页改名。`);
+}
 function persistWorkspace() {
   if (!workspaceReady) return;
   recordUndoHistory();
+  const hadProblem = saveProblem;
   try {
     localStorage.setItem(WORKSPACE_KEY, JSON.stringify(workspacePayload()));
     saveProblem = false;
   } catch {
     saveProblem = true;
   }
+  if (saveProblem && !hadProblem)
+    setTimeout(() => setStatus("浏览器存储已满或被禁用，修改没有保存到浏览器。请先用“导出 → 导出全部方案”备份。", true), 0);
+  updatePlanBadge();
   if ($("storageStatus"))
     $("storageStatus").textContent = saveProblem
       ? "浏览器保存失败，请导出配置文件。"
@@ -6208,7 +6314,7 @@ function persistWorkspace() {
 }
 function loadWorkspace() {
   try {
-    const raw = localStorage.getItem(WORKSPACE_KEY);
+    const raw = localStorage.getItem(WORKSPACE_KEY) ?? (WORKSPACE_KEY !== LEGACY_WORKSPACE_KEY ? localStorage.getItem(LEGACY_WORKSPACE_KEY) : null);
     if (raw) {
       const { w, s } = normalizeWorkspace(JSON.parse(raw));
       workshop = w;
@@ -6614,6 +6720,7 @@ function rememberEditing() {
   workshop.previous = { active: copy(workshop.active), state: copy(state) };
 }
 function loadNamedPlan(p) {
+  if (interfaceState.multiPlanner) return openPlannerDoc({ name: p.name, kind: p.kind || "new", id: p.id || null }, p.state, p.id);
   rememberEditing();
   state = validSnapshot(p.state);
   workshop.active = { name: p.name, kind: p.kind || "new", id: p.id || null };
@@ -6737,6 +6844,38 @@ function initProjects() {
   };
   $("exportConfig").onclick = () => exportSinglePlan();
   $("exportAll").onclick = exportAllPlans;
+  $("savePlan").onclick = quickSave;
+  $("exportAllHeader").onclick = () => {
+    $("exportMenu").open = false;
+    exportAllPlans();
+  };
+  document.addEventListener("keydown", (e) => {
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "s") {
+      e.preventDefault();
+      quickSave();
+    }
+  });
+  document.addEventListener("click", (e) => {
+    if ($("exportMenu").open && !e.target.closest("#exportMenu")) $("exportMenu").open = false;
+  });
+  // Another tab saved: take its plan list, keep this tab's current edit.
+  window.addEventListener("storage", (e) => {
+    if (e.key !== WORKSPACE_KEY || !e.newValue || !workspaceReady) return;
+    try {
+      const { w } = normalizeWorkspace(JSON.parse(e.newValue)),
+        changed = JSON.stringify(w.plans.map((p) => [p.id, p.name, p.savedAt])) !== JSON.stringify(workshop.plans.map((p) => [p.id, p.name, p.savedAt]));
+      // Never write back here: two tabs answering each other would loop.
+      if (!changed) return;
+      workshop.plans = w.plans;
+      workshop.nextId = Math.max(workshop.nextId, w.nextId);
+      workshop.existing = w.existing;
+      if (!workshop.plans.some((p) => p.id === workshop.active?.id) && workshop.active?.id)
+        workshop.active = { ...workshop.active, id: null };
+      updatePlanBadge();
+      if (!$("workspaceTab").hidden) renderWorkspace();
+      setStatus("另一个标签页修改了已保存方案，已同步到这里；当前编辑保留。");
+    } catch {}
+  });
   document.addEventListener("click", (e) => {
     const button = e.target.closest("button");
     if (!button) return;
@@ -8776,6 +8915,7 @@ let interfaceReady = false,
     active: "planner",
     folded: false,
     compact: false,
+    multiPlanner: false,
   },
   milestonePage = 1;
 function uiIcon(name) {
@@ -8812,17 +8952,31 @@ function interfaceNavigate(tab) {
     el.classList.toggle("selected", active);
     el.setAttribute("aria-current", active ? "page" : "false");
   });
-  $("workspaceTabs").innerHTML = interfaceState.tabs
-    .map(
-      (k) =>
-        `<div class="workspace-tab${k === tab ? " active" : ""}"><button data-tab="${k}">${esc(UI_PAGES[k][0])}</button>${k !== "planner" ? `<button class="tab-close" data-close-tab="${k}" aria-label="关闭${esc(UI_PAGES[k][0])}页签">×</button>` : ""}</div>`,
-    )
-    .join("");
+  renderTabBar(tab);
   document.body.classList.remove("sidebar-mobile-open");
   if (tab === "home") renderHome();
   if (tab === "progress") renderMilestoneGallery();
   if (tab === "worldmap") requestMapDraw();
   storeInterface();
+}
+function renderTabBar(tab = interfaceState.active) {
+  if (!$("workspaceTabs")) return;
+  $("workspaceTabs").innerHTML = interfaceState.tabs
+    .map((k) => {
+      if (k === "planner" && interfaceState.multiPlanner && typeof plannerDocs === "function") {
+        const docs = plannerDocs();
+        return docs
+          .map((d) => {
+            const live = d.key === workshop.activeTabKey,
+              name = (live ? workshop.active.name : d.active.name) || "未命名方案",
+              dirty = docDirty(d);
+            return `<div class="workspace-tab planner-doc${live && tab === "planner" ? " active" : ""}${live ? " current" : ""}"><button data-planner-doc="${esc(d.key)}" title="${esc(name)}${dirty ? "（未保存）" : ""}">${esc(name)}${dirty ? '<span class="doc-dirty" aria-label="未保存">•</span>' : ""}</button>${docs.length > 1 ? `<button class="tab-close" data-close-planner="${esc(d.key)}" aria-label="关闭${esc(name)}">×</button>` : ""}</div>`;
+          })
+          .join("") + '<button class="tab-add" data-new-planner title="新建产线规划页" aria-label="新建产线规划页">＋</button>';
+      }
+      return `<div class="workspace-tab${k === tab ? " active" : ""}"><button data-tab="${k}">${esc(UI_PAGES[k][0])}</button>${k !== "planner" ? `<button class="tab-close" data-close-tab="${k}" aria-label="关闭${esc(UI_PAGES[k][0])}页签">×</button>` : ""}</div>`;
+    })
+    .join("");
 }
 function renderHome() {
   const data = [
@@ -9034,6 +9188,7 @@ function initInterface() {
         active: "planner",
         folded: !!x.folded,
         compact: !!x.compact,
+        multiPlanner: !!x.multiPlanner,
       };
   } catch {}
   const navButton = (k, label) =>
@@ -11529,8 +11684,11 @@ function download(name, body, type = "application/json") {
     a = document.createElement("a");
   a.href = url;
   a.download = name;
+  a.style.display = "none";
+  document.body.appendChild(a);
   a.click();
-  setTimeout(() => URL.revokeObjectURL(url), 2000);
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
 }
 function init() {
   loadWorkspace();
@@ -11826,7 +11984,10 @@ function init() {
         "image/svg+xml",
       );
   };
-  $("export").onclick = () => exportSinglePlan();
+  $("export").onclick = () => {
+    $("exportMenu").open = false;
+    exportSinglePlan();
+  };
   $("import").onclick = () => $("importFile").click();
   $("importFile").onchange = importWorkspaceFile;
   $("reset").onclick = () => {
@@ -12218,6 +12379,10 @@ Object.assign(EN_UI, {
   "手动连接参与物料计算；未连接的工序不会自动供料。": "Manual links constrain the calculation; unlinked steps receive no material.",
   "较多：只标注需并行的线路，其余悬停查看流量。": "many: only parallel lines are labeled; hover for the rest.",
   "导出全部方案": "Export all plans",
+  "未命名方案": "Untitled plan", " · 未保存": " · unsaved", " · 已保存": " · saved", " · 浏览器保存失败": " · browser save failed",
+  "产线规划页": "Planner pages", "允许同时打开多个产线规划页": "Allow several planner pages at once", "新建产线规划页": "New planner page",
+  "打开后，标签栏每个方案一页，点“＋”新建空白规划页，方案列表的“载入”会在新页打开。各页的未保存修改分别保留，刷新后仍在。": "When on, each plan gets its own tab; “＋” opens a blank planner page and “Load” in the plan list opens a new page. Each page keeps its own unsaved edits, also after a reload.",
+  "导出当前方案": "Export current plan", "导出": "Export", "导入并合并": "Import & merge", "保存": "Save",
   "石油 / 铝最优配方": "Optimal oil / aluminum recipes",
   "按里程碑解锁": "By milestone unlock", "按产线上下游": "By flow order", "排序": "Sort", "回收站": "Sink",
 });
@@ -12574,7 +12739,7 @@ function initUndoRedo() {
   const redo = document.createElement('button');
   redo.id = 'redoAction'; redo.textContent = '↷ 重做'; redo.title = '重做（Ctrl+Y / Ctrl+Shift+Z / ⌘Shift+Z）';
   redo.setAttribute('aria-keyshortcuts', 'Control+Y Control+Shift+Z Meta+Shift+Z');
-  $('export').before(undo, redo);
+  ($('planBadge') || $('export')).before(undo, redo);
   undo.onclick = () => restoreUndoHistory('undo');
   redo.onclick = () => restoreUndoHistory('redo');
   document.addEventListener('input', event => {
@@ -12832,6 +12997,119 @@ initMachineGroups();
 initRouting();
 
 initSurplusHandling();
+
+// Startup: say what was restored instead of the blank-plan hint.
+setTimeout(() => {
+  updatePlanBadge();
+  if (!workspaceReady) return;
+  const named = workshop.plans.some((p) => p.id === workshop.active?.id),
+    hasContent = state.products.length || state.supplies.length || state.nodes.length;
+  if (named)
+    setStatus(`已恢复上次编辑：${workshop.active.name}${activePlanDirty() ? "（有未保存修改，点“保存”或按 Ctrl+S 写入方案）" : ""}`);
+  else if (hasContent) setStatus("已恢复上次未保存的编辑。点“保存”或按 Ctrl+S 保存为方案。");
+}, 0);
+
+// ===== Multiple planner pages (Settings → 多个产线规划页) =====
+function plannerDocs() {
+  if (!Array.isArray(workshop.plannerTabs)) workshop.plannerTabs = [];
+  if (!workshop.plannerTabs.some((d) => d.key === workshop.activeTabKey)) {
+    workshop.activeTabKey ||= "main";
+    workshop.plannerTabs.unshift({ key: workshop.activeTabKey, active: copy(workshop.active), state: null });
+  }
+  return workshop.plannerTabs;
+}
+function docDirty(d) {
+  const live = d.key === workshop.activeTabKey;
+  if (live) return activePlanDirty();
+  const p = workshop.plans.find((x) => x.id === d.active?.id);
+  return !p || canonicalState(d.state) !== canonicalState(p.state);
+}
+function switchPlannerDoc(key) {
+  const docs = plannerDocs(),
+    target = docs.find((d) => d.key === key);
+  if (!target) return;
+  if (key !== workshop.activeTabKey) {
+    const live = docs.find((d) => d.key === workshop.activeTabKey);
+    live.state = copy(state);
+    live.active = copy(workshop.active);
+    state = validSnapshot(target.state);
+    workshop.active = copy(target.active);
+    target.state = null;
+    workshop.activeTabKey = key;
+    renderAll();
+    if (!$("workspaceTab").hidden) renderWorkspace();
+  }
+  switchTab("planner");
+  save();
+}
+function openPlannerDoc(active, snapshot, planId = null) {
+  const docs = plannerDocs();
+  if (planId != null) {
+    const open = docs.find((d) => (d.key === workshop.activeTabKey ? workshop.active.id : d.active?.id) === planId);
+    if (open) {
+      switchPlannerDoc(open.key);
+      return setStatus(`“${active.name}”已在规划页中打开，已切换过去。`);
+    }
+  }
+  if (docs.length >= 30) return setStatus("最多同时打开 30 个产线规划页，请先关闭一些。", true);
+  const key = "p" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  docs.splice(docs.findIndex((d) => d.key === workshop.activeTabKey) + 1, 0, { key, active: copy(active), state: validSnapshot(copy(snapshot)) });
+  switchPlannerDoc(key);
+  setStatus(`已在新的产线规划页打开：${active.name}`);
+}
+function closePlannerDoc(key) {
+  const docs = plannerDocs();
+  if (docs.length <= 1) return;
+  const i = docs.findIndex((d) => d.key === key);
+  if (i < 0) return;
+  const doc = docs[i],
+    name = (key === workshop.activeTabKey ? workshop.active.name : doc.active.name) || "未命名方案",
+    dirty = docDirty(doc);
+  if (key === workshop.activeTabKey) switchPlannerDoc(docs[i + 1]?.key || docs[i - 1].key);
+  workshop.plannerTabs = plannerDocs().filter((d) => d.key !== key);
+  save();
+  renderTabBar();
+  setStatus(`已关闭规划页：${name}${dirty ? "（有未保存修改，可点“撤销”找回）" : ""}`);
+}
+function setMultiPlanner(on) {
+  interfaceState.multiPlanner = !!on;
+  storeInterface();
+  if (!on) {
+    // Keep only the page being edited; others stay recoverable via undo.
+    const dirty = plannerDocs().filter((d) => d.key !== workshop.activeTabKey && docDirty(d)).length;
+    workshop.plannerTabs = plannerDocs().filter((d) => d.key === workshop.activeTabKey);
+    save();
+    setStatus(dirty ? `已关闭多页规划，保留当前页；${dirty} 个其他页有未保存修改，可点“撤销”找回。` : "已关闭多页规划，保留当前页。");
+  } else setStatus("已开启多页规划：标签栏点“＋”新建规划页，方案列表的“载入”会在新页打开。");
+  renderTabBar();
+}
+(function initMultiPlanner() {
+  const panel = document.createElement("div");
+  panel.className = "panel";
+  panel.innerHTML = '<h2>产线规划页</h2><label class="buildcheck"><input id="multiPlannerToggle" type="checkbox"> 允许同时打开多个产线规划页</label><p class="small">打开后，标签栏每个方案一页，点“＋”新建空白规划页，方案列表的“载入”会在新页打开。各页的未保存修改分别保留，刷新后仍在。</p>';
+  $("settingsTab")?.append(panel);
+  const toggle = $("multiPlannerToggle");
+  if (toggle) {
+    toggle.checked = !!interfaceState.multiPlanner;
+    toggle.onchange = (e) => setMultiPlanner(e.target.checked);
+  }
+  $("workspaceTabs").addEventListener("click", (e) => {
+    const doc = e.target.closest("[data-planner-doc]"),
+      close = e.target.closest("[data-close-planner]"),
+      add = e.target.closest("[data-new-planner]");
+    if (close) {
+      e.stopPropagation();
+      closePlannerDoc(close.dataset.closePlanner);
+    } else if (doc) {
+      e.stopPropagation();
+      switchPlannerDoc(doc.dataset.plannerDoc);
+    } else if (add) {
+      e.stopPropagation();
+      openPlannerDoc({ name: "未命名方案", kind: "new", id: null }, fresh());
+    }
+  });
+  renderTabBar();
+})();
 
 // Optimization runs in an isolated worker; existing planning remains responsive.
 const OPT_TABLES=globalThis.__factoryBundle.optimization;

@@ -2785,3 +2785,24 @@ html[lang="en"] .board-caption {
 #surplus .fluid-advice { margin-top: 6px; padding: 8px 10px; border-radius: 8px; background: #f0f9ff; border: 1px solid #bae6fd; font-size: 12.5px; color: #0c4a6e; }
 #surplus .fluid-advice ol { margin: 4px 0 0; padding-left: 18px; }
 #surplus .fluid-advice li { margin: 2px 0; }
+
+/* Header save state and export menu */
+.plan-badge { display: inline-flex; align-items: center; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; padding: 5px 10px; border-radius: 999px; border: 1px solid #e2e8f0; color: #475569; background: #f8fafc; }
+.plan-badge.clean { color: #166534; border-color: #bbf7d0; background: #f0fdf4; }
+.plan-badge.dirty { color: #9a3412; border-color: #fed7aa; background: #fff7ed; }
+.plan-badge.error { color: #b91c1c; border-color: #fecaca; background: #fef2f2; }
+.app-header details.menu { position: relative; display: inline-block; }
+.app-header details.menu > summary { list-style: none; cursor: pointer; padding: 7px 10px; border: 1px solid #d8dee6; border-radius: 8px; background: #fff; font-size: 12px; line-height: 1.25; }
+.app-header details.menu > summary::-webkit-details-marker { display: none; }
+.app-header details.menu > summary::after { content: " ▾"; color: #94a3b8; }
+.app-header details.menu .menu-list { position: absolute; right: 0; top: calc(100% + 6px); z-index: 50; display: flex; flex-direction: column; min-width: 150px; padding: 6px; background: #fff; border: 1px solid #e2e8f0; border-radius: 10px; box-shadow: 0 10px 24px rgba(15, 23, 42, 0.12); }
+.app-header details.menu .menu-list button { border: 0; background: transparent; text-align: left; padding: 8px 10px; border-radius: 6px; }
+.app-header details.menu .menu-list button:hover { background: #fff7ed; color: #b45309; }
+@media (max-width: 760px) { .plan-badge { display: none; } }
+@media (max-width: 540px) { .app-header details.menu > summary { padding: 6px; font-size: 11px; } }
+
+/* Multiple planner pages */
+.workspace-tab.planner-doc > button:first-child { font-weight: 500; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-tab .doc-dirty { color: #ea580c; margin-left: 4px; font-weight: 700; }
+.workspace-tabs .tab-add { border: 1px dashed #cbd5e1; background: transparent; color: #64748b; border-radius: 8px; padding: 4px 10px; margin-left: 4px; cursor: pointer; }
+.workspace-tabs .tab-add:hover { border-color: #d97706; color: #b45309; background: #fffaf2; }
