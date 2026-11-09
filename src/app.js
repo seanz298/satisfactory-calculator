@@ -2768,6 +2768,15 @@ function initProjects() {
   $("exportConfig").onclick = () => exportSinglePlan();
   $("exportAll").onclick = exportAllPlans;
   $("savePlan").onclick = quickSave;
+  // Place the export dropdown under its button (the header row scrolls).
+  $("exportMenu").addEventListener("toggle", () => {
+    if (!$("exportMenu").open) return;
+    const r = $("exportMenu").querySelector("summary").getBoundingClientRect(),
+      list = $("exportMenu").querySelector(".menu-list");
+    list.style.top = Math.round(r.bottom + 6) + "px";
+    list.style.left = Math.round(Math.max(8, Math.min(r.left, innerWidth - 178))) + "px";
+    list.style.right = "auto";
+  });
   $("exportAllHeader").onclick = () => {
     $("exportMenu").open = false;
     exportAllPlans();
