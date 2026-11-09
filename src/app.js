@@ -5259,11 +5259,11 @@ function renderProductionMind() {
 function boardColor(n) {
   return (
     {
-      external: "#3187b3",
-      recipe: "#50865e",
-      product: "#c98322",
-      surplus: "#bb5960",
-    }[n.type] || "#50865e"
+      external: "#0ea5e9",
+      recipe: "#16a34a",
+      product: "#d97706",
+      surplus: "#e11d48",
+    }[n.type] || "#16a34a"
   );
 }
 function boardText(text, x, y, size = 12, color = "#334155", max = 26) {
@@ -5286,7 +5286,7 @@ function paintBoard() {
     }
   const width = Math.max(1000, ...flow.nodes.map((n) => n.x + 440)),
     height = Math.max(650, ...flow.nodes.map((n) => n.y + n.h + 60));
-  let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" aria-label="机器卡片产线规划画布" style="font-family:system-ui,Microsoft YaHei,sans-serif"><defs><pattern id="boardDots" width="24" height="24" patternUnits="userSpaceOnUse"><circle cx="2" cy="2" r="1" fill="#cbd5e1"/></pattern><marker id="boardArrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="#7792a3"/></marker></defs><rect width="100%" height="100%" fill="#f4f7fa"/><rect width="100%" height="100%" fill="url(#boardDots)"/>`;
+  let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" aria-label="机器卡片产线规划画布" style="font-family:system-ui,Microsoft YaHei,sans-serif"><defs><pattern id="boardDots" width="24" height="24" patternUnits="userSpaceOnUse"><circle cx="2" cy="2" r="1.1" fill="#d5dbe3"/></pattern>${[["s", "#94a3b8"], ["f", "#38a3c9"], ["h", "#d97706"]].map(([k, c]) => `<marker id="boardArrow-${k}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="${c}"/></marker>`).join("")}<filter id="boardShadow" x="-5%" y="-5%" width="110%" height="120%"><feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#0f172a" flood-opacity="0.08"/></filter></defs><rect width="100%" height="100%" fill="#f8fafc"/><rect width="100%" height="100%" fill="url(#boardDots)"/>`;
   const routed = flow.edges.filter(
       (e) => by.get(e.to).level !== by.get(e.from).level + 1,
     ),
@@ -5307,7 +5307,10 @@ function paintBoard() {
       opacity = boardSelected && !strong ? 0.25 : 1,
       labelX = (p.x + q.x) / 2,
       labelY = outside ? lane : (p.y + q.y) / 2;
-    svg += `<g opacity="${opacity}"><path d="${path}" fill="none" stroke="${strong ? "#dd8c26" : I[e.item]?.fluid ? "#52a9c0" : "#7792a3"}" stroke-width="${strong ? 3 : 1.6}" ${back ? 'stroke-dasharray="7 4"' : ""} marker-end="url(#boardArrow)"><title>${esc(I[e.item].name + " " + fmt(e.q) + " " + unit(e.item))}</title></path>${$("boardLabels").checked ? `<rect x="${labelX - 58}" y="${labelY - 10}" width="116" height="18" rx="5" fill="white"/>${boardText(fmt(e.q) + " " + unit(e.item), labelX - 52, labelY + 2, 10, "#546779", 20)}` : ""}</g>`;
+    const edgeColor = strong ? "#d97706" : I[e.item]?.fluid ? "#38a3c9" : "#94a3b8",
+      labelText = fmt(e.q) + " " + unit(e.item),
+      labelW = Math.max(64, labelText.length * 7.2 + 18);
+    svg += `<g opacity="${opacity}"><path d="${path}" fill="none" stroke="${edgeColor}" stroke-width="${strong ? 3.2 : 2}" stroke-linecap="round" ${back ? 'stroke-dasharray="8 5"' : ""} marker-end="url(#boardArrow-${strong ? "h" : I[e.item]?.fluid ? "f" : "s"})"><title>${esc(I[e.item].name + " " + fmt(e.q) + " " + unit(e.item))}</title></path>${$("boardLabels").checked ? `<rect x="${labelX - labelW / 2}" y="${labelY - 11}" width="${labelW}" height="22" rx="11" fill="white" stroke="${edgeColor}" stroke-opacity="0.5"/><text x="${labelX}" y="${labelY + 4}" font-size="12" fill="#334155" text-anchor="middle">${esc(labelText)}</text>` : ""}</g>`;
   }
   for (const n of flow.nodes) {
     const color = boardColor(n),
@@ -5320,7 +5323,7 @@ function paintBoard() {
             surplus: state.surplusHandling?.[n.item] === "sink" ? "送入AWESOME回收站" : "副产物 / 待处理",
           }[n.type],
       isBuilt = row && machineIsBuilt(row, graphPreview?.s || state);
-    svg += `<g data-board-node="${esc(n.id)}" transform="translate(${n.x},${n.y})" opacity="${boardSelected && !highlight.has(n.id) ? 0.55 : 1}" role="button" tabindex="0" aria-label="${esc(n.label)}：查看产线明细" style="cursor:grab"><title>${esc(n.label)}</title><rect width="380" height="${n.h}" rx="12" fill="white" stroke="${boardSelected === n.id ? "#e5a23f" : color}" stroke-width="${boardSelected === n.id ? 3 : 1.4}"/><path d="M12 1H368" stroke="${color}" stroke-width="4"/>${ICONS[materialId(n.item)] ? `<image href="${ICONS[materialId(n.item)]}" x="14" y="16" width="32" height="32"/>` : ""}${boardText(n.label, 54, 31, 14, "#172534", 21)}${boardText(sub + (n.cycle ? " · 循环工序" : "") + (isBuilt ? " · ✓已建" : ""), 54, 50, 11, color, 31)}${boardText(row ? machineLabel(row) : fmt(n.q) + " " + unit(n.item), 14, 77, 12, "#334155", 43)}<g data-board-fold="${esc(n.id)}" role="button" tabindex="0" aria-label="${n.fold ? "展开" : "收起"}卡片" style="cursor:pointer"><rect x="344" y="12" width="24" height="24" rx="5" fill="#edf2f7"/>${boardText(n.fold ? "+" : "−", 351, 29, 16)}</g>`;
+    svg += `<g data-board-node="${esc(n.id)}" transform="translate(${n.x},${n.y})" opacity="${boardSelected && !highlight.has(n.id) ? 0.55 : 1}" role="button" tabindex="0" aria-label="${esc(n.label)}：查看产线明细" style="cursor:grab"><title>${esc(n.label)}</title><rect width="380" height="${n.h}" rx="14" fill="white" stroke="${boardSelected === n.id ? "#d97706" : "#e2e8f0"}" stroke-width="${boardSelected === n.id ? 3 : 1.2}" filter="url(#boardShadow)"/><path d="M14 0H366A14 14 0 0 1 380 14V62H0V14A14 14 0 0 1 14 0Z" fill="${color}" fill-opacity="0.08"/><path d="M16 1.5H364" stroke="${color}" stroke-width="3.5" stroke-linecap="round"/><rect x="12" y="13" width="40" height="40" rx="10" fill="white" stroke="${color}" stroke-opacity="0.25"/>${ICONS[materialId(n.item)] ? `<image href="${ICONS[materialId(n.item)]}" x="16" y="17" width="32" height="32"/>` : ""}${boardText(n.label, 62, 33, 16, "#0f172a", 18)}${boardText(sub + (n.cycle ? " · 循环工序" : "") + (isBuilt ? " · ✓已建" : ""), 62, 51, 12, color, 26)}${boardText(row ? machineLabel(row) : fmt(n.q) + " " + unit(n.item), 14, 84, 13.5, "#1e293b", 40)}<g data-board-fold="${esc(n.id)}" role="button" tabindex="0" aria-label="${n.fold ? "展开" : "收起"}卡片" style="cursor:pointer"><rect x="340" y="14" width="26" height="26" rx="8" fill="white" stroke="#e2e8f0"/>${boardText(n.fold ? "+" : "−", 348, 32, 16, "#475569")}</g>`;
     if (!n.fold) {
       svg += boardText(
         row
@@ -5329,12 +5332,12 @@ function paintBoard() {
             : "耗电 " + fmt(row.power) + " MW · 峰值 " + fmt(row.peak) + " MW"
           : "物料流量 · 每分钟",
         14,
-        100,
-        11,
-        "#637388",
-        45,
+        103,
+        12,
+        "#64748b",
+        42,
       );
-      svg += `<path d="M0 111H380" stroke="#e4eaf0"/>${boardText("输入", 14, 130, 10, "#8491a0")}${boardText("输出", 207, 130, 10, "#8491a0")}`;
+      svg += `<path d="M14 114H366" stroke="#eef1f5"/>${boardText("输入", 14, 132, 11, "#94a3b8")}${boardText("输出", 207, 132, 11, "#94a3b8")}`;
       for (const [side, ports] of [
         [0, n.ports.ins],
         [1, n.ports.outs],
@@ -5342,10 +5345,10 @@ function paintBoard() {
         for (const [[id, q], i] of ports.map((p, i) => [p, i])) {
           const x = side ? 207 : 14,
             y = 148 + i * 42;
-          svg += `<circle data-route-port="${side ? 'out' : 'in'}" data-route-node="${esc(n.id)}" data-route-item="${esc(id)}" cx="${side ? 380 : 0}" cy="${y}" r="8" fill="${I[id]?.fluid ? "#52a9c0" : color}" stroke="white" stroke-width="2" style="cursor:crosshair;touch-action:none"><title>${side ? '拖动输出端口连接输入' : '物料输入端口'}</title></circle>${ICONS[id] ? `<image href="${ICONS[id]}" x="${x}" y="${y - 10}" width="22" height="22"/>` : ""}${boardText(I[id].name, x + 27, y, 11, "#334155", 12)}${boardText(fmt(q) + " " + unit(id), x + 27, y + 16, 11, "#172534", 23)}`;
+          svg += `<circle data-route-port="${side ? 'out' : 'in'}" data-route-node="${esc(n.id)}" data-route-item="${esc(id)}" cx="${side ? 380 : 0}" cy="${y}" r="7.5" fill="${I[id]?.fluid ? "#38a3c9" : color}" stroke="white" stroke-width="2.5" style="cursor:crosshair;touch-action:none"><title>${side ? '拖动输出端口连接输入' : '物料输入端口'}</title></circle>${ICONS[id] ? `<image href="${ICONS[id]}" x="${x}" y="${y - 12}" width="26" height="26"/>` : ""}${boardText(I[id].name, x + 32, y, 12.5, "#334155", 10)}${boardText(fmt(q) + " " + unit(id), x + 32, y + 17, 12.5, "#0f172a", 18)}`;
         }
       if (row)
-        svg += `<path d="M14 ${n.h - 40}H366" stroke="#edf1f5"/>${boardText("末台" + (row.duty < 0.999999 ? "平均" : "") + "产出：" + lastMachineOutputText(row), 14, n.h - 18, 10, "#64748b", 48)}`;
+        svg += `<path d="M14 ${n.h - 40}H366" stroke="#eef1f5"/>${boardText("末台" + (row.duty < 0.999999 ? "平均" : "") + "产出：" + lastMachineOutputText(row), 14, n.h - 16, 11.5, "#64748b", 44)}`;
     }
     svg += "</g>";
   }
@@ -5392,14 +5395,20 @@ function zoomProductionMind() {
     scale = Number($("mindZoom").value) / 100;
   svg.style.width = box.width * scale + "px";
   svg.style.height = box.height * scale + "px";
+  // Shrink the canvas to its content instead of leaving a tall empty box.
+  if (!$("graphTab").classList.contains("graph-expanded"))
+    $("productionMind").style.height = Math.max(380, Math.min(680, box.height * scale + 4)) + "px";
+  else $("productionMind").style.height = "";
   $("mindZoomLabel").textContent = fmt(scale * 100) + "%";
 }
-function fitProductionBoard() {
+function fitProductionBoard(min = 10) {
   const svg = $("productionMind").querySelector("svg"),
     host = $("productionMind");
   if (!svg) return;
+  if (typeof min !== "number") min = 10;
+  host.style.height = "";
   $("mindZoom").value = Math.max(
-    10,
+    min,
     Math.min(
       100,
       Math.floor(
@@ -5414,6 +5423,10 @@ function fitProductionBoard() {
   host.scrollTo(0, 0);
 }
 function selectProductionGraph(mode) {
+  if (mode !== graphMode) {
+    if (mode === "network") graphNeedsFit = true;
+    if (mode === "mind") boardNeedsFit = true;
+  }
   graphMode = mode;
   for (const [m, button, container] of [
     ["network", "viewNetwork", "network"],
@@ -5427,6 +5440,10 @@ function selectProductionGraph(mode) {
   $("graphControls").hidden = mode !== "network";
   $("mindControls").hidden = mode !== "mind";
   renderGraph();
+  if (mode === "network" && graphNeedsFit && $("network").clientWidth) {
+    autoFitNetwork();
+    graphNeedsFit = false;
+  }
 }
 function initProductionMind() {
   const host = $("productionMind"),
@@ -5443,7 +5460,22 @@ function initProductionMind() {
   renderGraph = () => {
     if (graphMode === "mind") {
       renderGraphPreviewLabel();
+      updateGraphSummary();
       renderProductionMind();
+      if (boardNeedsFit && $("productionMind").querySelector("svg")) {
+        boardNeedsFit = false;
+        requestAnimationFrame(() => {
+          fitProductionBoard(70);
+          // Start at the first cards rather than an empty corner.
+          const nodes = boardFlow?.nodes || [],
+            scale = +$("mindZoom").value / 100;
+          if (nodes.length)
+            $("productionMind").scrollTo(
+              Math.max(0, (Math.min(...nodes.map((n) => n.x)) - 40) * scale),
+              Math.max(0, (Math.min(...nodes.map((n) => n.y)) - 40) * scale),
+            );
+        });
+      }
     } else base();
   };
   $("viewMind").onclick = () => selectProductionGraph("mind");
@@ -7042,8 +7074,19 @@ function generatorCalculation(s = state) {
     water: rows.reduce((s, r) => s + r.usedWater, 0),
   };
 }
+function updateGraphSummary() {
+  const el = $("graphSummary");
+  if (!el) return;
+  const plan = graphPreview?.plan || current;
+  el.textContent = plan
+    ? `${plan.rows.length} 道工序 · ${fmt(plan.machines)} 台机器 · ${fmt(plan.power)} MW${graphPreview ? " · 缺料预览" : ""}`
+    : "当前方案不可行";
+}
+let graphNeedsFit = true,
+  boardNeedsFit = true;
 function renderGraph() {
   renderGraphPreviewLabel();
+  updateGraphSummary();
   const shown = graphPreview?.plan || current;
   if (!shown) {
     $("network").innerHTML =
@@ -7111,57 +7154,71 @@ function renderGraph() {
     const r = rank(comp[n.id]);
     (columns[r] ??= []).push(n);
   }
+  const NW = 250, NH = 86, COL = 340, ROW = 118, PAD = 32;
   let maxRows = 0;
   for (const [col, ns] of Object.entries(columns)) {
     maxRows = Math.max(maxRows, ns.length);
     ns.forEach((n, i) => {
-      n.x = 35 + +col * 370;
-      n.y = 35 + i * 150;
+      n.x = PAD + +col * COL;
+      n.y = PAD + i * ROW;
     });
   }
-  const width = 330 + Math.max(...Object.keys(columns).map(Number)) * 370,
-    height = 70 + maxRows * 150;
-  let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-label="当前产线物料网络"><defs><marker id="arr" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0 0L7 3.5L0 7Z" fill="#68808a"/></marker></defs><rect width="100%" height="100%" fill="#f6f8fa"/>`;
+  const width = PAD * 2 + NW + Math.max(...Object.keys(columns).map(Number)) * COL,
+    height = PAD * 2 + NH + (maxRows - 1) * ROW;
+  const textWidth = (t) => [...t].reduce((a, ch) => a + (/[\u0000-\u00ff]/.test(ch) ? 6.2 : 10.5), 0);
+  let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-label="当前产线物料网络" style="font-family:system-ui,'Microsoft YaHei',sans-serif"><defs><pattern id="netDots" width="22" height="22" patternUnits="userSpaceOnUse"><circle cx="1.5" cy="1.5" r="1" fill="#d5dbe3"/></pattern>${["solid", "fluid", "cycle", "multi", "hot"].map((k) => `<marker id="arr-${k}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10Z" fill="${{ solid: "#94a3b8", fluid: "#38a3c9", cycle: "#e07a5f", multi: "#d97706", hot: "#dc2626" }[k]}"/></marker>`).join("")}</defs><rect width="100%" height="100%" fill="#f8fafc"/><rect width="100%" height="100%" fill="url(#netDots)"/>`;
+  let labels = "";
+  // Dense plans: keep only highlighted / parallel-line labels; hover shows the rest.
+  const denseLabels = edges.length > 80;
+  if ($("graphLabelNote"))
+    $("graphLabelNote").textContent = denseLabels ? `连线 ${edges.length} 条，较多：只标注需并行的线路，其余悬停查看流量。` : "";
   for (const [i, e] of edges.entries()) {
     const a = map.get(e.from),
       b = map.get(e.to),
-      x1 = a.x + 270,
-      y1 = a.y + 45,
+      x1 = a.x + NW,
+      y1 = a.y + NH / 2,
       x2 = b.x,
-      y2 = b.y + 45,
+      y2 = b.y + NH / 2,
       cycle = comp[e.from] === comp[e.to],
       transportCap = I[e.item].fluid
         ? state.transport.pipe
         : state.transport.belt,
-      lanes = lineLanes(e.q, transportCap);
-    let path = cycle
-      ? `M${x1},${y1} C${x1 + 60},${y1} ${x1 + 60},${y2} ${x2 + 270},${y2}`
-      : `M${x1},${y1} C${x1 + 55},${y1} ${x2 - 55},${y2} ${x2},${y2}`;
-    svg += `<path d="${path}" fill="none" stroke="${highlight.edges.has(e) ? "#c52d20" : lanes > 1 ? "#bb7400" : cycle ? "#c66b4d" : "#91a7af"}" stroke-width="${highlight.edges.has(e) ? 3 : 1.6}" marker-end="url(#arr)"${cycle ? ' stroke-dasharray="5 3"' : ""}/><text x="${cycle ? x1 + 12 : (x1 + x2) / 2}" y="${(y1 + y2) / 2 - 7 + (i % 3) * 12}" font-size="10" fill="#42565c" text-anchor="middle" paint-order="stroke" stroke="#f6f8fa" stroke-width="3">${esc(I[e.item].name)} ${fmt(e.q)}${lanes > 1 ? " · " + lanes + "条并行" : ""}</text>`;
+      lanes = lineLanes(e.q, transportCap),
+      hot = highlight.edges.has(e),
+      kind = hot ? "hot" : lanes > 1 ? "multi" : cycle ? "cycle" : I[e.item].fluid ? "fluid" : "solid",
+      color = { solid: "#94a3b8", fluid: "#38a3c9", cycle: "#e07a5f", multi: "#d97706", hot: "#dc2626" }[kind];
+    const back = x2 <= x1;
+    const path = cycle || back
+      ? `M${x1},${y1} C${x1 + 70},${y1} ${x1 + 70},${y2 + (y2 >= y1 ? 1 : -1) * 0} ${x2 + NW},${y2}`
+      : `M${x1},${y1} C${x1 + (x2 - x1) * 0.5},${y1} ${x2 - (x2 - x1) * 0.5},${y2} ${x2 - 2},${y2}`;
+    svg += `<path d="${path}" fill="none" stroke="${color}" stroke-width="${hot ? 3 : lanes > 1 ? 2.4 : 1.6}" stroke-linecap="round" marker-end="url(#arr-${kind})"${cycle ? ' stroke-dasharray="6 4"' : ""} opacity="0.95"><title>${esc(I[e.item].name + " " + fmt(e.q) + " " + unit(e.item) + (lanes > 1 ? " · 需 " + lanes + " 条并行" : ""))}</title></path>`;
+    const text = `${I[e.item].name} ${fmt(e.q)}${lanes > 1 ? " ×" + lanes : ""}`,
+      w = textWidth(text) + 14,
+      lx = cycle || back ? x1 + 50 : (x1 + x2) / 2,
+      ly = (y1 + y2) / 2 + ((i % 3) - 1) * 9;
+    if (denseLabels && !hot && lanes <= 1) continue;
+    labels += `<g><rect x="${lx - w / 2}" y="${ly - 9}" width="${w}" height="18" rx="9" fill="#fff" stroke="${color}" stroke-opacity="0.45"/><text x="${lx}" y="${ly + 3.5}" font-size="10.5" fill="#334155" text-anchor="middle">${esc(text)}</text></g>`;
   }
-  const colors = {
-    external: ["#e8f4fc", "#77a5c0"],
-    recipe: ["#eef6ee", "#85a589"],
-    product: ["#fff1db", "#dca052"],
-    surplus: ["#fff0ed", "#d69990"],
-  };
+  svg += labels;
+  const accents = { external: "#0ea5e9", recipe: "#16a34a", product: "#d97706", surplus: "#e11d48" },
+    tags = { external: "外部供给", product: "最终产物", surplus: "副产物" };
   for (const n of nodes) {
-    const [fill, stroke] = colors[n.type],
-      label = n.label.length > 23 ? n.label.slice(0, 22) + "…" : n.label,
-      sub =
-        n.type === "recipe"
-          ? B[R[n.id].b]?.name
-          : n.type === "external"
-            ? "外部供给"
-            : n.type === "product"
-              ? "最终产物"
-              : "副产物 / 待外送",
-      info = n.row ? machineLabel(n.row) : fmt(n.q) + " " + unit(n.item);
-    svg += `<g ${graphPreview && n.id === "e:" + graphPreview.item ? `data-missing-node="${graphPreview.item}" role="button" tabindex="0" style="cursor:pointer"` : ""}><title>${esc(n.label + " · " + sub + " · " + info)}</title><rect x="${n.x}" y="${n.y}" width="270" height="105" rx="10" fill="${highlight.nodes.has(n.id) ? "#fff0e9" : fill}" stroke="${highlight.nodes.has(n.id) ? "#c52d20" : stroke}" stroke-width="${highlight.nodes.has(n.id) ? 3 : 1}"/>${ICONS[materialId(n.item)] ? `<image href="${ICONS[materialId(n.item)]}" x="${n.x + 10}" y="${n.y + 14}" width="35" height="35"/>` : ""}<text x="${n.x + 52}" y="${n.y + 28}" font-size="13" fill="#18262b">${esc(label)}</text><text x="${n.x + 52}" y="${n.y + 47}" font-size="11" fill="#50666e">${esc(sub)}</text><text x="${n.x + 12}" y="${n.y + 78}" font-size="11" fill="#20353e">${esc(info)}</text></g>`;
+    const accent = accents[n.type] || "#16a34a",
+      hot = highlight.nodes.has(n.id),
+      label = n.label.length > 16 ? n.label.slice(0, 15) + "…" : n.label,
+      sub = n.type === "recipe" ? B[R[n.id].b]?.name || "" : tags[n.type],
+      info = n.row ? machineLabel(n.row) : fmt(n.q) + " " + unit(n.item),
+      infoShort = info.length > 30 ? info.slice(0, 29) + "…" : info,
+      iconId = materialId(n.item);
+    svg += `<g ${graphPreview && n.id === "e:" + graphPreview.item ? `data-missing-node="${graphPreview.item}" role="button" tabindex="0" style="cursor:pointer"` : ""}><title>${esc(n.label + " · " + sub + " · " + info)}</title><rect x="${n.x}" y="${n.y + 2}" width="${NW}" height="${NH}" rx="12" fill="#0f172a" opacity="0.05"/><rect x="${n.x}" y="${n.y}" width="${NW}" height="${NH}" rx="12" fill="${hot ? "#fff5f5" : "#fff"}" stroke="${hot ? "#dc2626" : "#e2e8f0"}" stroke-width="${hot ? 2.5 : 1}"/><path d="M${n.x + 12} ${n.y}H${n.x + NW - 12}" stroke="${accent}" stroke-width="3" stroke-linecap="round"/><rect x="${n.x + 12}" y="${n.y + 14}" width="38" height="38" rx="9" fill="${accent}" fill-opacity="0.1"/>${ICONS[iconId] ? `<image href="${ICONS[iconId]}" x="${n.x + 15}" y="${n.y + 17}" width="32" height="32"/>` : ""}<text x="${n.x + 60}" y="${n.y + 30}" font-size="13.5" font-weight="600" fill="#0f172a">${esc(label)}</text><text x="${n.x + 60}" y="${n.y + 48}" font-size="11" fill="${accent}">${esc(sub)}</text><line x1="${n.x + 12}" y1="${n.y + 61}" x2="${n.x + NW - 12}" y2="${n.y + 61}" stroke="#f1f5f9"/><text x="${n.x + 12}" y="${n.y + 76}" font-size="11" fill="#475569">${esc(infoShort)}</text>${n.type !== "recipe" ? `<circle cx="${n.x + NW - 16}" cy="${n.y + 18}" r="4" fill="${accent}"/>` : ""}</g>`;
   }
   svg += "</svg>";
   $("network").innerHTML = svg;
   zoomGraph();
+  if (graphNeedsFit && graphMode === "network" && $("network").clientWidth) {
+    autoFitNetwork();
+    graphNeedsFit = false;
+  }
   const expanded = new Set();
   function branch(id, path = new Set(), edge = null) {
     const n = map.get(id);
@@ -7183,6 +7240,16 @@ function renderGraph() {
     .map((n) => branch(n.id))
     .join("");
   dirtyGraph = false;
+}
+function autoFitNetwork() {
+  const svg = $("network").querySelector("svg"),
+    box = $("network");
+  if (!svg || !box.clientWidth) return;
+  const v = svg.viewBox.baseVal;
+  // Keep text readable: fit the width when possible, otherwise scroll.
+  $("graphZoom").value = Math.max(80, Math.min(100, Math.floor(((box.clientWidth - 4) / v.width) * 100)));
+  zoomGraph();
+  box.scrollTo(0, 0);
 }
 function zoomGraph() {
   const svg = $("network").querySelector("svg");
@@ -7861,6 +7928,20 @@ const languageTextMemory = new WeakMap(),
   languageAttributeMemory = new WeakMap();
 for (const [o, zh] of originalNames)
   if (o.en && /[\u3400-\u9fff]/.test(zh) && !EN_UI[zh]) EN_UI[zh] = o.en;
+Object.assign(EN_UI, {
+  "连线数字为每分钟物流量；虚线为循环回流，琥珀色线需要多条并行线路。树状图中的共享工序只展开一次。": "Link labels show flow per minute; dashed links are recycle loops and amber links need parallel lines. Shared steps expand once in the tree.",
+  "卡片画布": "Card canvas", "生产工序": "Production step", "需并行": "Needs parallel", "流体": "Fluid", "回流": "Recycle",
+  "道工序": " steps", "台机器": " machines", "缺料预览": "shortage preview", "当前方案不可行": "Current plan is infeasible",
+  "手动连接物料": "Manual material links", "显示节点明细": "Show node details", "隐藏节点明细": "Hide node details",
+  "剩余物料": "Leftover material", "剩余 / 分": "Leftover / min", "处理方式": "Handling", "回收积分 / 分": "Sink points / min", "下游消纳建议": "Downstream uses",
+  "待处理 / 外送": "Pending / export", "送入AWESOME回收站": "Send to AWESOME Sink", "设为最终产物": "Set as final product", "按剩余量添加产物": "Add product from leftover",
+  "回流环路": "Recycle loops", "环内循环 / 分": "Circulating / min", "环外输入 / 分": "Loop inputs / min", "环外输出 / 分": "Loop outputs / min",
+  "回用率": "Reuse rate", "回用去向": "Reused by", "末台满载 · 余量加入产物": "Fill last machines · add extra as products",
+  "自动生成连接，不限制物料流向。": "Links are generated automatically; material flow is not restricted.",
+  "手动连接参与物料计算；未连接的工序不会自动供料。": "Manual links constrain the calculation; unlinked steps receive no material.",
+  "较多：只标注需并行的线路，其余悬停查看流量。": "many: only parallel lines are labeled; hover for the rest.",
+  "按里程碑解锁": "By milestone unlock", "按产线上下游": "By flow order", "排序": "Sort", "回收站": "Sink",
+});
 const languagePattern = new RegExp(
   Object.keys(EN_UI)
     .filter((k) => k.length > 1)

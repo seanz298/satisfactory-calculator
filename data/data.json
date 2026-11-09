@@ -21606,7 +21606,7 @@
       "initials": "m（shs）"
     },
     "Recipe_Copper_Quartz_C": {
-      "name": "铜矿石（Quartz）",
+      "name": "铜矿石（粗石英）",
       "en": "Copper Ore (Quartz)",
       "ins": {
         "Desc_SAMIngot_C": 1.0,
@@ -21622,8 +21622,8 @@
       "event": false,
       "p": 250.0,
       "peak": 400.0,
-      "py": "tongkuangshi（Quartz）",
-      "initials": "tks（Quartz）"
+      "py": "tongkuangshi（cushiying）",
+      "initials": "tks（csy）"
     },
     "Recipe_Iron_Limestone_C": {
       "name": "铁矿石（石灰石）",
@@ -21846,7 +21846,7 @@
       "initials": "qjks（tks）"
     },
     "Recipe_Caterium_Quartz_C": {
-      "name": "钦金矿石（Quartz）",
+      "name": "钦金矿石（粗石英）",
       "en": "Caterium Ore (Quartz)",
       "ins": {
         "Desc_SAMIngot_C": 1.0,
@@ -21862,8 +21862,8 @@
       "event": false,
       "p": 250.0,
       "peak": 400.0,
-      "py": "qinjinkuangshi（Quartz）",
-      "initials": "qjks（Quartz）"
+      "py": "qinjinkuangshi（cushiying）",
+      "initials": "qjks（csy）"
     },
     "Recipe_Nitrogen_Caterium_C": {
       "name": "氮气（钦金矿石）",
@@ -21986,7 +21986,7 @@
       "initials": "lh（tks）"
     },
     "Recipe_Uranium_Bauxite_C": {
-      "name": "Uranium Ore（铝土矿）",
+      "name": "铀（铝土矿）",
       "en": "Uranium Ore (Bauxite)",
       "ins": {
         "Desc_SAMIngot_C": 1.0,
@@ -22002,8 +22002,8 @@
       "event": false,
       "p": 250.0,
       "peak": 400.0,
-      "py": "Uranium Ore（lvtukuang）",
-      "initials": "Uranium Ore（ltk）"
+      "py": "you（lvtukuang）",
+      "initials": "y（ltk）"
     },
     "Recipe_Converter_C": {
       "name": "转化站",
@@ -23088,7 +23088,7 @@
       "initials": "tzyy"
     },
     "Recipe_UnpackageOil_C": {
-      "name": "拆包：Oil",
+      "name": "拆包：原油",
       "en": "Unpackage Oil",
       "ins": {
         "Desc_PackagedOil_C": 2.0
@@ -23104,8 +23104,8 @@
       "event": false,
       "p": 10.0,
       "peak": 10.0,
-      "py": "chaibao：Oil",
-      "initials": "cb：Oil"
+      "py": "chaibao：yuanyou",
+      "initials": "cb：yy"
     },
     "Recipe_PackagedOilResidue_C": {
       "name": "桶装重油残渣",
@@ -24730,7 +24730,7 @@
       "initials": "jls"
     },
     "Recipe_Alternate_PolyesterFabric_C": {
-      "name": "Alternate: Polyester Fabric",
+      "name": "替代：聚酯纤维织物",
       "en": "Alternate: Polyester Fabric",
       "ins": {
         "Desc_PolymerResin_C": 1.0,
@@ -24746,8 +24746,8 @@
       "event": false,
       "p": 30.0,
       "peak": 30.0,
-      "py": "Alternate: Polyester Fabric",
-      "initials": "Alternate: Polyester Fabric"
+      "py": "tidai：juzhixianweizhiwu",
+      "initials": "td：jzxwzw"
     },
     "Recipe_Biomass_Mycelia_C": {
       "name": "生物质（菌丝体）",
@@ -27082,7 +27082,7 @@
       "initials": "td：jydl"
     },
     "Recipe_Alternate_Silica_Distilled_C": {
-      "name": "Alternate: Distilled Silica",
+      "name": "替代：蒸馏二氧化硅",
       "en": "Alternate: Distilled Silica",
       "ins": {
         "Desc_DissolvedSilica_C": 12.0,
@@ -27100,8 +27100,8 @@
       "event": false,
       "p": 75.0,
       "peak": 75.0,
-      "py": "Alternate: Distilled Silica",
-      "initials": "Alternate: Distilled Silica"
+      "py": "tidai：zhengliueryanghuagui",
+      "initials": "td：zleyhg"
     },
     "Recipe_Alternate_Quartz_Purified_C": {
       "name": "替代：石英净化",
