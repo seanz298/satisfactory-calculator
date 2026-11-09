@@ -2789,6 +2789,10 @@ html[lang="en"] .board-caption {
 #graphTab .graph-note { font-size: 12px; color: #b45309; }
 #graphTab .graph-note:empty { display: none; }
 
+#surplus .fluid-advice { margin-top: 6px; padding: 8px 10px; border-radius: 8px; background: #f0f9ff; border: 1px solid #bae6fd; font-size: 12.5px; color: #0c4a6e; }
+#surplus .fluid-advice ol { margin: 4px 0 0; padding-left: 18px; }
+#surplus .fluid-advice li { margin: 2px 0; }
+
 </style>
   </head>
   <body>
@@ -4860,7 +4864,7 @@ function surplusConsumers(id, q, s = state, limit = 3) {
     })
     .map((k) => {
       const r = R[k],
-        main = Object.keys(r.outs).find((o) => I[o]?.selectable && !I[o].handOnly && !isPowerItem(o));
+        main = Object.keys(r.outs).find((o) => I[o]?.selectable && !I[o].handOnly && !isPowerItem(o) && !I[o].fluid);
       if (!main) return null;
       const runs = q / r.ins[id];
       return {
@@ -4912,7 +4916,7 @@ function addSurplusConsumer(id, k, s = state) {
 }
 // Packaging route that turns a fluid into a sinkable item.
 function surplusPackaging(id, q, s = state) {
-  const k = Object.keys(R).find((r) => R[r].b === "Build_Packager_C" && !/Unpackage/.test(r) && R[r].ins[id] > 0 && (s.event || !R[r].event));
+  const k = packagingRecipe(id, s);
   if (!k) return null;
   const main = Object.keys(R[k].outs)[0];
   if (!sinkStatus(main).ok) return null;
@@ -4932,7 +4936,7 @@ function surplusGenerators(id, q, s = state) {
     })
     .filter((g) => g.mw > EPS);
 }
-function addSurplusPackaging(id, s = state) {
+function addSurplusPackaging(id, s = state, sink = true) {
   let q = current?.surplus?.[id] || 0,
     first = null,
     out = 0,
@@ -4942,7 +4946,7 @@ function addSurplusPackaging(id, s = state) {
   for (let i = 0; i < 30 && q > 1e-4; i++) {
     const pack = surplusPackaging(id, q, s);
     if (!pack || !(pack.out > EPS)) break;
-    if (!addProductOutput(pack.main, pack.k, pack.out, s, { sink: true })) break;
+    if (!addProductOutput(pack.main, pack.k, pack.out, s, sink ? { sink: true } : {})) break;
     first ??= pack;
     out += pack.out;
     containerQ += pack.containerQ;
@@ -4950,7 +4954,7 @@ function addSurplusPackaging(id, s = state) {
     q = plan?.surplus?.[id] || 0;
   }
   if (!first) return null;
-  const card = s.products.find((p) => p.sink && materialId(p.id) === first.main && recipeFor(p.id, s) === first.k);
+  const card = s.products.find((p) => !!p.sink === sink && materialId(p.id) === first.main && recipeFor(p.id, s) === first.k);
   if (card) card.q = Math.round(card.q * 1000) / 1000;
   return { ...first, pid: card?.id, out, containerQ, points: out * (SINK_POINTS[first.main] || 0) };
 }
@@ -4966,39 +4970,114 @@ function addSurplusGenerator(id, k, s = state) {
 }
 // Reverse planning: run every last machine at full clock, working from the
 // most downstream recipe upstream, and add the extra output as products.
+// Recommended handling for fluids that cannot be packaged or sunk.
+function fluidAdvice(id) {
+  return {
+    Desc_QuantumEnergy_C: {
+      title: "直接降频，不需要处理",
+      steps: [
+        "转化站生产激发态光子物质不消耗任何原料，只耗电。",
+        "多出来的量让末台转化站降频，或少建一台；“末台满载”不会补满这一组。",
+        "管道堵满后转化站会自动停转，不会浪费原料。",
+      ],
+    },
+    Desc_DarkEnergy_C: {
+      title: "回流到粒子加速站做成暗物质晶体",
+      steps: [
+        "首选“替代：晶体化暗物质”：10 暗物质残渣 → 1 暗物质晶体，只需残渣（需先解锁该替代配方）。",
+        "未解锁时用“暗物质晶体”：1 钻石 + 5 暗物质残渣 → 1 暗物质晶体；或“替代：暗物质捕获器”：1 时间水晶 + 5 残渣 → 2 晶体。",
+        "暗物质晶体是固体，可用于叠加态振荡器、合成能量碎片，或送回收站。",
+        "方案里本来就用转化站做暗物质残渣（消耗活性 SAM 物质）时，先用量子编码站的副产残渣，减少转化站这一组。",
+      ],
+    },
+  }[id] || null;
+}
+// Packager recipe that turns a fluid into a solid item, if any.
+function packagingRecipe(id, s = state) {
+  return Object.keys(R).find((r) => R[r].b === "Build_Packager_C" && !/Unpackage/.test(r) && R[r].ins[id] > 0 && (s.event || !R[r].event)) || null;
+}
+// Reverse planning: run every last machine at full clock, working from the
+// most downstream recipe upward. Extra solids become products; extra fluids
+// are packaged into solids, and rows whose extra fluid cannot be packaged
+// (e.g. Excited Photonic Matter, Dark Matter Residue) keep their last machine
+// underclocked.
 function fillLastMachines(s = state) {
   if (s.mode !== "reverse") return { ok: false, reason: "仅在“从产物反推”模式下可用。" };
-  const added = [];
-  for (let step = 0; step < 200; step++) {
+  const added = [],
+    skipped = new Map(),
+    skip = new Set(),
+    rounds = new Map(),
+    containers = new Set(["Desc_FluidCanister_C", "Desc_GasTank_C"]);
+  const addOutput = (item, recipe, q) => {
+    const existing = s.products.find((p) => materialId(p.id) === item && recipeFor(p.id, s) === recipe && !p.sink);
+    if (existing) {
+      existing.q = cleanComputedQuantity(existing.q + q);
+      return existing.id;
+    }
+    return addProductOutput(item, recipe, q, s);
+  };
+  for (let step = 0; step < 300; step++) {
     const solution = planSolve(demands(s), s, { mode: "reverse" }),
       plan = summarize(solution, s);
-    if (!plan) return { ok: false, reason: "方案不可行，已停止。", added };
+    if (!plan) return { ok: false, reason: "方案不可行，已停止。", added, skipped: [...skipped.values()] };
     const order = machineDisplayOrder(plan.rows, { ...s, machineSort: "flow" }, plan);
     const partial = order
       .filter((row) => {
         const r = R[row.k];
-        if (r.generation || machineGroup(row.k, s)) return false;
+        if (skip.has(row.k) || r.generation || r.b === "Build_Packager_C" || machineGroup(row.k, s)) return false;
         const main = Object.keys(r.outs)[0];
+        // Empty canisters / tanks only feed the packagers; extra ones help nobody.
+        if (containers.has(main)) return false;
         if (!I[main]?.selectable || I[main].handOnly || isPowerItem(main)) return false;
         const target = Math.ceil(row.eq / row.cap - 1e-6) * row.cap;
         return target - row.eq > 1e-6 * Math.max(1, row.cap);
       })
       .pop();
-    if (!partial) return { ok: true, added };
-    const main = Object.keys(R[partial.k].outs)[0],
-      target = Math.ceil(partial.eq / partial.cap - 1e-6) * partial.cap,
-      q = (target - partial.eq) * rates(partial.k, s).outs[main];
+    if (!partial) return { ok: true, added, skipped: [...skipped.values()] };
+    // Packaging can feed back (canisters need plastic, plastic leaves residue);
+    // stop rounding a recipe that keeps coming back.
+    rounds.set(partial.k, (rounds.get(partial.k) || 0) + 1);
+    if (rounds.get(partial.k) > 3) {
+      skip.add(partial.k);
+      skipped.set(partial.k, { recipe: partial.k, item: Object.keys(R[partial.k].outs)[0], loop: true });
+      continue;
+    }
     const recipe = recipeBase(partial.k),
-      existing = s.products.find((p) => materialId(p.id) === main && recipeFor(p.id, s) === recipe);
-    const pid = existing ? ((existing.q = cleanComputedQuantity(existing.q + q)), existing.id) : addProductOutput(main, recipe, q, s);
-    if (!pid) return { ok: false, reason: "无法添加产物。", added };
-    added.push({ id: main, recipe: partial.k, q });
+      rr = rates(partial.k, s),
+      extra = Math.ceil(partial.eq / partial.cap - 1e-6) * partial.cap - partial.eq,
+      main = Object.keys(R[partial.k].outs)[0];
+    // Every extra fluid (main output or byproduct) must be packageable.
+    const fluids = Object.keys(rr.outs).filter((id) => I[id]?.fluid && !isPowerItem(id)),
+      blocked = fluids.find((id) => !packagingRecipe(id, s));
+    if (blocked) {
+      skip.add(partial.k);
+      skipped.set(partial.k, { recipe: partial.k, item: blocked });
+      continue;
+    }
+    const snapshot = JSON.stringify({ products: s.products, selected: s.selected });
+    if (!I[main]?.fluid) addOutput(main, recipe, extra * rr.outs[main]);
+    for (const id of fluids) {
+      const pk = packagingRecipe(id, s),
+        packaged = Object.keys(R[pk].outs)[0];
+      addOutput(packaged, pk, ((extra * rr.outs[id]) / R[pk].ins[id]) * R[pk].outs[packaged]);
+    }
+    if (!planSolve(demands(s), s, { mode: "reverse" }).ok) {
+      const back = JSON.parse(snapshot);
+      s.products = back.products;
+      s.selected = back.selected;
+      skip.add(partial.k);
+      skipped.set(partial.k, { recipe: partial.k, item: main, infeasible: true });
+      continue;
+    }
+    added.push({ id: I[main]?.fluid ? Object.keys(R[packagingRecipe(main, s)].outs)[0] : main, recipe: partial.k });
   }
-  return { ok: false, reason: "迭代次数过多，已停止。", added };
+  return { ok: false, reason: "迭代次数过多，已停止。", added, skipped: [...skipped.values()] };
 }
 function addSurplusAsProduct(id, s = state) {
   const q = current?.surplus?.[id] || 0;
   if (!(q > EPS) || !I[id]?.selectable || I[id].handOnly) return null;
+  // Fluids become their packaged item instead of a fluid product.
+  if (I[id].fluid) return addSurplusPackaging(id, s, false)?.pid || null;
   const pid = nextProductItem(id, s);
   if (!pid) return null;
   s.products.push({ id: pid, q: cleanComputedQuantity(q), lock: false, pin: false });
@@ -5190,10 +5269,13 @@ function renderSurplusHandling(p) {
       ideas = surplusConsumers(id, q),
       pack = I[id]?.fluid ? surplusPackaging(id, q) : null,
       generators = surplusGenerators(id, q);
-    const fluidNote = I[id]?.fluid
-      ? `<div class="small fluid-note">流体：${state.strict ? "已开启“禁止多余流体外送”，需在下游消纳或封装。" : "外送需管道或流体储罐；也可封装成桶装件运输或回收。"}</div>`
-      : "";
-    const handling = `<select data-surplus-mode="${esc(id)}" aria-label="${esc(I[id]?.name || id)}处理方式"><option value="export"${mode === "export" ? " selected" : ""}>待处理 / 外送</option><option value="sink"${mode === "sink" ? " selected" : ""}${status.ok ? "" : " disabled"}>送入AWESOME回收站</option></select>${status.ok || I[id]?.fluid ? "" : `<div class="small">${esc(status.reason)}</div>`}${fluidNote}<div class="buttons" style="margin-top:6px">${I[id]?.selectable && !I[id].handOnly ? `<button data-surplus-product="${esc(id)}">设为最终产物</button>` : ""}${pack ? `<button data-surplus-pack="${esc(id)}" title="${esc(R[pack.k].name)}：至少 ${fmt(pack.out)} 件/分，另需${esc(I[pack.container]?.name || "")}；制造容器若再产生该流体，会一并封装">封装成${esc(I[pack.main]?.name || pack.main)}送回收站</button>` : ""}${generators.map((g) => `<button data-surplus-gen="${esc(id)}" data-surplus-recipe="${esc(g.k)}" title="${g.others.length ? "另需 " + g.others.map(([x, v]) => (I[x]?.name || x) + " " + fmt(v)).join("、") : ""}">送入${esc(B[R[g.k].b]?.name || R[g.k].name)} · ${fmt(g.mw)} MW</button>`).join("")}</div>`;
+    const advice = I[id]?.fluid && !pack ? fluidAdvice(id) : null;
+    const fluidNote = !I[id]?.fluid
+      ? ""
+      : pack
+        ? `<div class="small fluid-note">流体：建议封装成${esc(I[pack.main]?.name || pack.main)}，作为固体产物或送回收站。</div>`
+        : `<div class="fluid-advice"><b>推荐：${esc(advice?.title || "在下游消耗")}</b>${advice ? `<ol>${advice.steps.map((t) => `<li>${esc(t)}</li>`).join("")}</ol>` : `<div class="small">该流体不能封装、不能送回收站，只能在下游配方中消耗，或减少上游产量。</div>`}</div>`;
+    const handling = `<select data-surplus-mode="${esc(id)}" aria-label="${esc(I[id]?.name || id)}处理方式"><option value="export"${mode === "export" ? " selected" : ""}>待处理 / 外送</option><option value="sink"${mode === "sink" ? " selected" : ""}${status.ok ? "" : " disabled"}>送入AWESOME回收站</option></select>${status.ok || I[id]?.fluid ? "" : `<div class="small">${esc(status.reason)}</div>`}${fluidNote}<div class="buttons" style="margin-top:6px">${I[id]?.selectable && !I[id].handOnly && (!I[id].fluid || pack) ? `<button data-surplus-product="${esc(id)}">${I[id].fluid ? "封装成" + esc(I[pack.main]?.name || pack.main) + "作为产物" : "设为最终产物"}</button>` : ""}${pack ? `<button data-surplus-pack="${esc(id)}" title="${esc(R[pack.k].name)}：至少 ${fmt(pack.out)} 件/分，另需${esc(I[pack.container]?.name || "")}；制造容器若再产生该流体，会一并封装">封装成${esc(I[pack.main]?.name || pack.main)}送回收站</button>` : ""}${generators.map((g) => `<button data-surplus-gen="${esc(id)}" data-surplus-recipe="${esc(g.k)}" title="${g.others.length ? "另需 " + g.others.map(([x, v]) => (I[x]?.name || x) + " " + fmt(v)).join("、") : ""}">送入${esc(B[R[g.k].b]?.name || R[g.k].name)} · ${fmt(g.mw)} MW</button>`).join("")}</div>`;
     const consumers = ideas.length
       ? ideas.map((c) => `<div class="surplus-idea"><div><b>${esc(R[c.k].name)}</b>${R[c.k].alt ? " [替代]" : ""} → ${esc(I[c.main]?.name || c.main)} 约 <b>${fmt(c.out)}</b> ${unit(c.main)}${c.others.length ? `<div class="small">另需 ${c.others.map(([x, v]) => esc(I[x]?.name || x) + " " + fmt(v)).join("、")}</div>` : ""}</div><button data-surplus-use="${esc(id)}" data-surplus-recipe="${esc(c.k)}">按剩余量添加产物</button></div>`).join("")
       : '<span class="small">没有可用的下游配方</span>';
@@ -11540,7 +11622,9 @@ function init() {
     const r = fillLastMachines();
     renderAll();
     if (!r.ok) return setStatus(r.reason, true);
-    setStatus(r.added.length ? `末台已全部满载：${r.added.length} 处余量加入产物（${[...new Set(r.added.map((x) => I[x.id]?.name || x.id))].join("、")}），已从下游往上游重新反推。` : "所有末台已满载，无需调整。");
+    const kept = [...new Set((r.skipped || []).filter((x) => !x.loop).map((x) => x.item))].map((id) => (I[id]?.name || id) + (fluidAdvice(id) ? "（" + fluidAdvice(id).title + "）" : "")),
+      looped = [...new Set((r.skipped || []).filter((x) => x.loop).map((x) => R[x.recipe]?.name || x.recipe))];
+    setStatus((r.added.length ? `末台已满载：${r.added.length} 处余量加入产物（${[...new Set(r.added.map((x) => I[x.id]?.name || x.id))].join("、")}），流体已封装成固体，已从下游往上游重新反推。` : "没有需要补满的末台。") + (kept.length ? ` 以下流体无法封装，相关末台保持降频：${kept.join("、")}。` : "") + (looped.length ? ` 以下工序与封装互相牵连（如塑料 ⇄ 空桶），补满会反复放大，末台保持降频：${looped.join("、")}。` : ""));
   };
   $("machineSort").value = state.machineSort;
   $("machineSort").onchange = (e) => {

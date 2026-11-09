@@ -41,3 +41,25 @@ assert.ok(r.products.find(([id]) => id === 'Desc_Rotor_C')[1] === 8, 'rotor roun
 assert.equal(r.blocked, false);
 assert.deepEqual(r.round, ['Desc_PackagedOilResidue_C']);
 console.log('Fluid packaging/generators and reverse last-machine fill PASS');
+{
+ const r2 = JSON.parse(JSON.stringify(vm.runInContext(`(()=>{
+  // Fluids are never added as products: packageable ones become their packaged item,
+  // Excited Photonic Matter / Dark Matter Residue rows keep their last machine underclocked.
+  const s=fresh(); s.mode='reverse'; s.products=[{id:'Desc_SpaceElevatorPart_12_C',q:1.5,lock:true},{id:'Desc_Plastic_C',q:50,lock:true}];
+  const r=fillLastMachines(s); const p=summarize(planSolve(demands(s),s),s);
+  const fluidProducts=s.products.filter(x=>I[materialId(x.id)].fluid).map(x=>x.id);
+  // "Set as product" on a fluid surplus packages it.
+  const t=fresh(); t.mode='reverse'; t.products=[{id:'Desc_Plastic_C',q:120,lock:true}];
+  current=summarize(planSolve(demands(t),t),t); const pid=addSurplusAsProduct('Desc_HeavyOilResidue_C',t);
+  current={surplus:{Desc_DarkEnergy_C:50}}; const none=addSurplusAsProduct('Desc_DarkEnergy_C',t);
+  return {ok:r.ok,feasible:!!p,fluidProducts,skipped:r.skipped.map(x=>x.item),pid,sink:!!t.products.find(x=>x.id===pid)?.sink,none,
+    advice:[!!fluidAdvice('Desc_QuantumEnergy_C'),!!fluidAdvice('Desc_DarkEnergy_C')],dmrConsumers:surplusConsumers('Desc_DarkEnergy_C',50,{...fresh(),optimizationSettings:{alternates:['Recipe_Alternate_DarkMatter_Crystallization_C']}}).map(c=>c.main)};
+ })()`, c)));
+ assert.ok(r2.ok && r2.feasible);
+ assert.deepEqual(r2.fluidProducts, []);
+ assert.ok(r2.skipped.includes('Desc_QuantumEnergy_C'));
+ assert.equal(r2.pid, 'Desc_PackagedOilResidue_C'); assert.equal(r2.sink, false); assert.equal(r2.none, null);
+ assert.deepEqual(r2.advice, [true, true]);
+ assert.ok(r2.dmrConsumers.includes('Desc_DarkMatter_C'));
+ console.log('Fluids are packaged or kept underclocked, never added as fluid products PASS');
+}
