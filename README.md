@@ -14,7 +14,8 @@ It is a single static web page: no backend, no account, no installation. Plans a
 | Area | What you can do |
 | --- | --- |
 | Production planning | Plan forward from supplies, reverse-plan from target products, or limit output by one input; lock targets and pick alternate recipes |
-| Optimal recipes | One click in reverse mode picks the oil and aluminum recipes that use the least crude oil and bauxite |
+| Optimal recipes | In reverse mode, compare every recipe for every item and switch to the best mix for least raw resources, fewest machines, least power, or least of chosen resources; a one-click oil / aluminum preset is kept |
+| Supply checklist | Copy the external supply / reverse demand list as text, or download it as CSV |
 | Machines and clocks | Machines sorted by milestone unlock (or flow order), per-machine clocks, Somersloops, Power Shards, and a one-click “fill last machines” that rounds every last machine up to full clock |
 | Byproducts and fluids | Send leftovers to the AWESOME Sink (sinks, power and points are counted), set them as products, or add a downstream product; fluids are packaged into solids; recycle loops show circulation and the cheapest priming point |
 | Power | Several independent power targets, fuel, water, generation and nuclear-waste chains in one balance |
@@ -51,6 +52,10 @@ Then visit <http://localhost:8000>.
 - There are no accounts, cloud saves or real-time collaboration.
 
 ## Optimizers
+
+**Optimize all recipes** (reverse mode, section 05): pick a target — least raw resources (weighted by whole-map availability), fewest machines, least power, or least of chosen resources — and every recipe for every item is solved together. Ties are broken by the other cost (machines for the raw target, raw resources otherwise). Alternates follow the unlocked list in Settings; if none is set, all alternates are used. The new recipes are applied to the current plan and can be undone.
+
+**Checklist** (section 04): copies the external materials (raw resources first) with demand, current supply and difference, plus the products, machine count and power; or downloads the same as a CSV that opens in Excel.
 
 **Optimal oil / aluminum recipes** (reverse mode, section 05): solves all oil recipes (plastic, rubber, polymer resin, heavy oil residue, fuel, petroleum coke, turbofuel) and aluminum recipes (alumina, scrap, ingot, sheet, casing, silica) together. It first minimizes crude oil and bauxite, then the other raw resources weighted by whole-map availability. If unlocked alternates are set in Settings, only those are used. The result can be undone.
 
@@ -99,7 +104,7 @@ In **Settings → Pages**, choose **Deploy from a branch**, then select `main` a
 
 - Game data is a bundled snapshot of version 1.2.3.1 and is not updated automatically.
 - Results are steady-state material balances. Startup time, pipe filling and other transient behavior are not simulated.
-- When the optimal oil / aluminum solution mixes two recipes for one item, only the dominant recipe is applied.
+- When an optimal solution mixes two recipes for one item, only the dominant recipe is applied, so the result can be slightly above the true optimum.
 
 ## Feedback
 
