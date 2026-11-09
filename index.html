@@ -2814,6 +2814,39 @@ html[lang="en"] .board-caption {
 .workspace-tabs .tab-add { border: 1px dashed #cbd5e1; background: transparent; color: #64748b; border-radius: 8px; padding: 4px 10px; margin-left: 4px; cursor: pointer; }
 .workspace-tabs .tab-add:hover { border-color: #d97706; color: #b45309; background: #fffaf2; }
 
+/* Header actions: always one row; when they do not fit (phones, phone
+   landscape, small laptops) the row scrolls sideways instead of wrapping out
+   of the fixed-height bar. */
+.app-header { align-items: center; }
+.app-header .brand { flex: none; }
+.app-header .buttons {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+  padding: 4px 2px;
+}
+.app-header .buttons::-webkit-scrollbar { display: none; }
+.app-header .buttons > * { flex: none; white-space: nowrap; }
+/* Right-aligned when everything fits; scrollable from the start when not */
+.app-header .buttons > :first-child { margin-left: auto; }
+/* The scroll row would clip the dropdown; it is positioned by script */
+.app-header details.menu .menu-list { position: fixed; }
+@media (max-width: 1100px) {
+  /* Most used first when the row may need scrolling (incl. phone landscape) */
+  #savePlan { order: -3; }
+  #exportMenu { order: -2; }
+  #import { order: -1; }
+}
+@media (max-width: 760px) {
+  .app-header { gap: 8px; }
+}
+
 </style>
   </head>
   <body>
@@ -6845,6 +6878,15 @@ function initProjects() {
   $("exportConfig").onclick = () => exportSinglePlan();
   $("exportAll").onclick = exportAllPlans;
   $("savePlan").onclick = quickSave;
+  // Place the export dropdown under its button (the header row scrolls).
+  $("exportMenu").addEventListener("toggle", () => {
+    if (!$("exportMenu").open) return;
+    const r = $("exportMenu").querySelector("summary").getBoundingClientRect(),
+      list = $("exportMenu").querySelector(".menu-list");
+    list.style.top = Math.round(r.bottom + 6) + "px";
+    list.style.left = Math.round(Math.max(8, Math.min(r.left, innerWidth - 178))) + "px";
+    list.style.right = "auto";
+  });
   $("exportAllHeader").onclick = () => {
     $("exportMenu").open = false;
     exportAllPlans();
