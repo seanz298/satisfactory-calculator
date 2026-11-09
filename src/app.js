@@ -36,6 +36,27 @@ const SINK_POINTS = (() => {
 })();
 const SINK_RATE = 1200, SINK_POWER = 30;
 const NON_SINKABLE = new Set(["Desc_NuclearWaste_C", "Desc_PlutoniumWaste_C"]);
+// Whole-map extraction limits (normal purities) from the bundled optimizer
+// tables; fluids converted from mL to m³. Water is unlimited.
+const RESOURCE_LIMITS = (() => {
+  const t = globalThis.__factoryBundle.optimization?.normal, out = {};
+  for (const [key, r] of Object.entries(t?.resources || {})) {
+    if (r.is_unlimited) { out[r.item_class] = Infinity; continue; }
+    let best = 0;
+    for (const c of t.columns) if (c.coeffs["resource|" + key] === -1) best = Math.max(best, c.coeffs["item|" + r.item_class] || 0);
+    out[r.item_class] = (out[r.item_class] || 0) + (best * r.count) / (DATA.items[r.item_class]?.fluid ? 1000 : 1);
+  }
+  return out;
+})();
+// Scarcity weight per unit of raw resource: iron ore = 1, water = 0.
+function resourceWeight(id) {
+  const limit = RESOURCE_LIMITS[id];
+  if (limit === Infinity) return 0;
+  return limit > 0 ? (RESOURCE_LIMITS.Desc_OreIron_C || limit) / limit : 0;
+}
+const PRIMARY_RAW = ["Desc_LiquidOil_C", "Desc_OreBauxite_C"];
+const OIL_FAMILY = ["Desc_Plastic_C", "Desc_Rubber_C", "Desc_PolymerResin_C", "Desc_HeavyOilResidue_C", "Desc_LiquidFuel_C", "Desc_PetroleumCoke_C", "Desc_LiquidTurboFuel_C"];
+const ALUMINUM_FAMILY = ["Desc_AluminaSolution_C", "Desc_AluminumScrap_C", "Desc_AluminumIngot_C", "Desc_AluminumPlate_C", "Desc_AluminumCasing_C", "Desc_Silica_C"];
 // Milestone that unlocks each production building (Satisfactory 1.x).
 const BUILDING_UNLOCK = {
   Build_SmelterMk1_C: "Schematic_Tutorial1_5_C",
@@ -927,6 +948,110 @@ function addSurplusGenerator(id, k, s = state) {
 }
 // Reverse planning: run every last machine at full clock, working from the
 // most downstream recipe upstream, and add the extra output as products.
+// Crude oil + bauxite use, each scaled by its map limit so neither dominates.
+function primaryRawCost(plan) {
+  if (!plan) return Infinity;
+  return PRIMARY_RAW.reduce((a, id) => a + (plan.external?.[id] || 0) * resourceWeight(id), 0);
+}
+// Weighted raw-resource cost of a solved plan (scarcity weights; power as a tie-breaker).
+function rawResourceCost(plan) {
+  if (!plan) return Infinity;
+  let cost = 0;
+  for (const [id, q] of Object.entries(plan.external || {})) if (I[id]?.raw && q > EPS) cost += q * resourceWeight(id);
+  return cost + plan.power * 1e-4;
+}
+// Reverse mode: choose the oil and aluminum recipes that use the least crude
+// oil and bauxite; among those, the least of the other (scarcity-weighted) raw
+// resources. All candidate recipes are solved together so byproduct loops
+// (residual plastic/rubber, recycled rubber/plastic, scrap water) count.
+function optimizeOilAluminum(s = state) {
+  if (s.mode !== "reverse") return { ok: false, reason: "仅在“从产物反推”模式下可用。" };
+  const base = planSolve(demands(s), s, { mode: "reverse" }),
+    before = summarize(base, s);
+  if (!before) return { ok: false, reason: "当前方案不可行，先修正后再优化。" };
+  const boundary = new Set(s.supplies.filter((x) => x.stop).map((x) => x.id)),
+    involved = new Set(base.involved),
+    family = [...OIL_FAMILY, ...ALUMINUM_FAMILY].filter((id) => involved.has(id) && !boundary.has(id));
+  if (!family.length) return { ok: false, reason: "当前方案没有石油或铝相关工序（或已作为外部供给起点）。" };
+  const unlocked = new Set(s.optimizationSettings?.alternates || []),
+    useAll = !unlocked.size,
+    chosen = new Set(Object.values(s.selected || {}));
+  const allowed = (k) => {
+    const r = R[k];
+    return r?.kind === "machine" && !r.generation && !r.groupParent && r.b !== "Build_Packager_C" &&
+      (s.event || !r.event) && (!r.alt || useAll || unlocked.has(k) || chosen.has(k));
+  };
+  const rs = new Set(base.rs);
+  for (const id of family) for (const k of OPTIONS[id] || []) if (allowed(k)) rs.add(k);
+  const demand = canonicalDemands(demands(s)),
+    model = { optimize: "objective", opType: "min", constraints: {}, variables: {} },
+    items = new Set(Object.keys(demand));
+  for (const k of rs) for (const id of [...Object.keys(R[k].ins), ...Object.keys(R[k].outs)]) items.add(id);
+  for (const id of items) model.constraints[id] = { min: demand[id] || 0 };
+  for (const k of rs) {
+    const rr = rates(k, s),
+      v = { objective: (R[k].p || 0) * 1e-4 + 1e-6 };
+    for (const [id, q] of Object.entries(rr.outs)) v[id] = (v[id] || 0) + q;
+    for (const [id, q] of Object.entries(rr.ins)) v[id] = (v[id] || 0) - q;
+    model.variables[k] = v;
+  }
+  for (const id of items) {
+    const produced = [...rs].some((k) => R[k].outs[id] > 0);
+    if (I[id]?.raw) model.variables["ext:" + id] = { objective: resourceWeight(id), [id]: 1 };
+    else if (boundary.has(id)) model.variables["ext:" + id] = { objective: 0, [id]: 1 };
+    else if (!produced) model.variables["ext:" + id] = { objective: 1e4, [id]: 1 };
+  }
+  // Stage 1: least crude oil + bauxite (unproducible items stay prohibitive).
+  const secondary = Object.fromEntries(Object.entries(model.variables).map(([k, v]) => [k, v.objective]));
+  for (const [k, v] of Object.entries(model.variables))
+    v.objective = k.startsWith("ext:") && PRIMARY_RAW.includes(k.slice(4)) ? resourceWeight(k.slice(4)) : secondary[k] >= 1e4 ? 1e4 : 0;
+  for (const id of PRIMARY_RAW) if (model.variables["ext:" + id]) model.variables["ext:" + id].primary = resourceWeight(id);
+  const first = solver.Solve(model);
+  if (!first?.feasible) return { ok: false, reason: "求解失败，保持原配方。" };
+  const best = PRIMARY_RAW.reduce((a, id) => a + (first["ext:" + id] || 0) * resourceWeight(id), 0);
+  // Stage 2: keep that minimum, then minimise everything else.
+  model.constraints.primary = { max: best * (1 + 1e-7) + 1e-7 };
+  for (const [k, v] of Object.entries(model.variables)) v.objective = secondary[k];
+  const result = solver.Solve(model);
+  if (!result?.feasible) return { ok: false, reason: "求解失败，保持原配方。" };
+  // Pick the dominant producer of each family item.
+  const changes = [], mixed = [], next = copy(s);
+  for (const id of family) {
+    // Only items the optimum actually uses; pure byproducts keep their recipe.
+    const used = (demand[id] || 0) + [...rs].reduce((a, k) => a + (result[k] || 0) * (rates(k, s).ins[id] || 0), 0);
+    if (used < 1e-6) continue;
+    const producers = [...rs]
+      .filter((k) => R[k].outs[id] > 0 && (result[k] || 0) > 1e-9)
+      .map((k) => [k, (result[k] || 0) * rates(k, s).outs[id]])
+      .sort((a, b) => b[1] - a[1]);
+    if (!producers.length) continue;
+    const total = producers.reduce((a, [, q]) => a + q, 0),
+      [best] = producers[0];
+    if (producers.length > 1 && producers[1][1] > total * 0.05) mixed.push(id);
+    if (recipeFor(id, s) !== best && OPTIONS[id]?.includes(best)) {
+      changes.push({ id, from: recipeFor(id, s), to: best });
+      next.selected[id] = best;
+    }
+  }
+  const after = summarize(planSolve(demands(next), next, { mode: "reverse" }), next),
+    primaryBefore = primaryRawCost(before),
+    primaryAfter = primaryRawCost(after),
+    costBefore = rawResourceCost(before),
+    costAfter = rawResourceCost(after);
+  const better = after && (primaryAfter < primaryBefore - 1e-6 || (primaryAfter <= primaryBefore + 1e-6 && costAfter < costBefore - 1e-6));
+  if (!changes.length || !better)
+    return { ok: true, applied: false, changes: [], costBefore, costAfter: costBefore, family, useAll };
+  s.selected = next.selected;
+  const raw = {};
+  for (const id of new Set([...Object.keys(before.external), ...Object.keys(after.external)]))
+    if (I[id]?.raw) {
+      const d = (after.external[id] || 0) - (before.external[id] || 0);
+      if (Math.abs(d) > 1e-6) raw[id] = d;
+    }
+  return { ok: true, applied: true, changes, mixed, costBefore, costAfter, raw, family, useAll, powerDelta: after.power - before.power,
+    oil: [before.external.Desc_LiquidOil_C || 0, after.external.Desc_LiquidOil_C || 0],
+    bauxite: [before.external.Desc_OreBauxite_C || 0, after.external.Desc_OreBauxite_C || 0] };
+}
 // Recommended handling for fluids that cannot be packaged or sunk.
 function fluidAdvice(id) {
   return {
@@ -6602,6 +6727,7 @@ function controls() {
     $(k).checked = state[k];
   if ($("machineSort")) $("machineSort").value = state.machineSort;
   if ($("fillLastMachines")) $("fillLastMachines").hidden = state.mode !== "reverse";
+  if ($("optimizeOilAl")) $("optimizeOilAl").hidden = state.mode !== "reverse";
   for (const k of ["mode", "sort", "clockNum", "powerMult"])
     $(k).value = ["mode", "sort"].includes(k) ? state[k] : displayNumber(state[k === "clockNum" ? "clock" : k]);
   $("clock").max = $("clockNum").max = state.over ? 250 : 100;
@@ -7582,6 +7708,16 @@ function init() {
     state.powerMult = normalizeMultiplier(e.target.value);
     renderAll();
   };
+  $("optimizeOilAl").onclick = () => {
+    const r = optimizeOilAluminum();
+    renderAll();
+    if (!r.ok) return setStatus(r.reason, true);
+    const scope = r.useAll ? "全部替代配方（设置中未勾选已解锁替代配方）" : "已解锁替代配方";
+    if (!r.applied) return setStatus(`石油 / 铝配方已是原油和铝土矿消耗最低的组合（按${scope}比较）。`);
+    const pair = ([a, b], name) => (a > EPS || b > EPS ? `${name} ${fmt(a)} → ${fmt(b)}` : "");
+    const raw = Object.entries(r.raw).sort((a, b) => a[1] - b[1]).map(([id, d]) => `${I[id]?.name || id} ${d > 0 ? "+" : ""}${fmt(d)}`).join("、");
+    setStatus(`已换成最优配方（按${scope}）：${r.changes.map((c) => `${I[c.id]?.name || c.id} → ${R[c.to]?.name || c.to}`).join("；")}。${[pair(r.oil, "原油"), pair(r.bauxite, "铝土矿")].filter(Boolean).join("，")}${raw ? "；全部原料变化：" + raw : ""}${Math.abs(r.powerDelta) > 0.5 ? `；耗电 ${r.powerDelta > 0 ? "+" : ""}${fmt(r.powerDelta)} MW` : ""}。${r.mixed.length ? "最优解混用了多种配方，已选主要的一种：" + r.mixed.map((id) => I[id]?.name || id).join("、") + "。" : ""}可撤销。`);
+  };
   $("fillLastMachines").onclick = () => {
     const r = fillLastMachines();
     renderAll();
@@ -8028,6 +8164,7 @@ Object.assign(EN_UI, {
   "手动连接参与物料计算；未连接的工序不会自动供料。": "Manual links constrain the calculation; unlinked steps receive no material.",
   "较多：只标注需并行的线路，其余悬停查看流量。": "many: only parallel lines are labeled; hover for the rest.",
   "导出全部方案": "Export all plans",
+  "石油 / 铝最优配方": "Optimal oil / aluminum recipes",
   "按里程碑解锁": "By milestone unlock", "按产线上下游": "By flow order", "排序": "Sort", "回收站": "Sink",
 });
 const languagePattern = new RegExp(
