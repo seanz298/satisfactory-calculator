@@ -2814,6 +2814,33 @@ html[lang="en"] .board-caption {
 .workspace-tabs .tab-add { border: 1px dashed #cbd5e1; background: transparent; color: #64748b; border-radius: 8px; padding: 4px 10px; margin-left: 4px; cursor: pointer; }
 .workspace-tabs .tab-add:hover { border-color: #d97706; color: #b45309; background: #fffaf2; }
 
+/* Mobile header: one row, actions scroll sideways instead of wrapping out of the bar */
+@media (max-width: 760px) {
+  .app-header { align-items: center; gap: 8px; }
+  .app-header .brand { flex: none; }
+  .app-header .buttons {
+    flex: 1 1 auto;
+    min-width: 0;
+    margin-left: 0;
+    display: flex;
+    flex-wrap: nowrap;
+    align-items: center;
+    overflow-x: auto;
+    overflow-y: hidden;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    padding: 4px 2px;
+  }
+  .app-header .buttons::-webkit-scrollbar { display: none; }
+  .app-header .buttons > * { flex: none; white-space: nowrap; }
+  /* Most used first */
+  #savePlan { order: -3; }
+  #exportMenu { order: -2; }
+  #import { order: -1; }
+  /* The scroll row would clip the dropdown, so pin it under the header */
+  .app-header details.menu .menu-list { position: fixed; top: 58px; right: 10px; }
+}
+
 </style>
   </head>
   <body>
