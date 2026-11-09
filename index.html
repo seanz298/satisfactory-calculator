@@ -2847,6 +2847,26 @@ html[lang="en"] .board-caption {
   .app-header { gap: 8px; }
 }
 
+/* Optimal recipes control */
+.optimal-group { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.optimal-group[hidden] { display: none; }
+.optimal-group select { padding: 6px 8px; border-radius: 8px; }
+#optimalRaws { position: relative; }
+#optimalRaws[hidden] { display: none; }
+#optimalRaws > summary { list-style: none; cursor: pointer; padding: 6px 10px; border: 1px solid #d8dee6; border-radius: 8px; background: #fff; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+#optimalRaws > summary::-webkit-details-marker { display: none; }
+#optimalRaws > summary::after { content: " ▾"; color: #94a3b8; }
+#optimalRaws .menu-list { position: absolute; z-index: 30; top: calc(100% + 6px); left: 0; display: grid; grid-template-columns: repeat(2, minmax(110px, 1fr)); gap: 4px 12px; padding: 10px 12px; background: #fff; border: 1px solid #e2e8f0; border-radius: 10px; box-shadow: 0 10px 24px rgba(15, 23, 42, 0.12); min-width: 260px; }
+#optimalRaws .menu-list label { display: flex; align-items: center; gap: 6px; font-size: 13px; white-space: nowrap; }
+
+/* Supply checklist menu */
+.supply-list-menu { position: relative; margin-left: auto; }
+.supply-list-menu > summary { list-style: none; cursor: pointer; padding: 6px 12px; border: 1px solid #d8dee6; border-radius: 8px; background: #fff; font-size: 13px; }
+.supply-list-menu > summary::-webkit-details-marker { display: none; }
+.supply-list-menu > summary::after { content: " ▾"; color: #94a3b8; }
+.supply-list-menu .menu-list { position: absolute; right: 0; top: calc(100% + 6px); z-index: 30; display: flex; flex-direction: column; gap: 4px; padding: 6px; min-width: 150px; background: #fff; border: 1px solid #e2e8f0; border-radius: 10px; box-shadow: 0 10px 24px rgba(15, 23, 42, 0.12); }
+.supply-list-menu .menu-list button { text-align: left; white-space: nowrap; }
+
 </style>
   </head>
   <body>
@@ -3088,12 +3108,12 @@ html[lang="en"] .board-caption {
             <div class="panel" style="margin-top: 20px">
               <div class="toolbar">
                 <h2>04 / 供给与反推需求</h2>
-                <button id="applyReverse" hidden>将反推需求设为外部供给</button>
+                <details id="supplyListMenu" class="menu supply-list-menu"><summary title="把外部供给、反推需求和产物拉成清单">拉清单</summary><div class="menu-list"><button id="copySupplyList">复制文字清单</button><button id="csvSupplyList">下载 CSV 表格</button></div></details><button id="applyReverse" hidden>将反推需求设为外部供给</button>
               </div>
               <div id="balance"></div>
             </div>
             <div class="panel">
-              <div class="toolbar"><h2 style="margin: 0">05 / 机器与逐台频率</h2><button id="optimizeOilAl" title="反推模式：同时比较石油和铝相关的全部配方，选出原油和铝土矿消耗最少的组合；同等消耗下其他原料最少">石油 / 铝最优配方</button><button id="fillLastMachines" title="从最下游开始，把每组末台机器补满到设定频率，多出的产量加入最终产物，再往上游重新反推">末台满载 · 余量加入产物</button><label>排序 <select id="machineSort" aria-label="机器排序"><option value="milestone">按里程碑解锁</option><option value="flow">按产线上下游</option></select></label></div>
+              <div class="toolbar"><h2 style="margin: 0">05 / 机器与逐台频率</h2><span id="optimalGroup" class="optimal-group"><select id="optimalTarget" aria-label="最优目标" title="最优目标"><option value="raw">原料消耗最少</option><option value="machines">机器最少</option><option value="power">耗电最少</option><option value="raws">指定原料最少</option></select><details id="optimalRaws" class="menu" hidden><summary>选择原料</summary><div id="optimalRawList" class="menu-list"></div></details><button id="optimizeAll" title="反推模式：所有物品的全部配方一起比较（替代配方跟随设置中的已解锁列表，未勾选时用全部），按所选目标换成最优组合；可撤销">全配方最优</button></span><button id="optimizeOilAl" title="反推模式：同时比较石油和铝相关的全部配方，选出原油和铝土矿消耗最少的组合；同等消耗下其他原料最少">石油 / 铝最优配方</button><button id="fillLastMachines" title="从最下游开始，把每组末台机器补满到设定频率，多出的产量加入最终产物，再往上游重新反推">末台满载 · 余量加入产物</button><label>排序 <select id="machineSort" aria-label="机器排序"><option value="milestone">按里程碑解锁</option><option value="flow">按产线上下游</option></select></label></div>
 
               <div class="tablewrap">
                 <table>
@@ -4164,6 +4184,12 @@ function resourceWeight(id) {
   if (limit === Infinity) return 0;
   return limit > 0 ? (RESOURCE_LIMITS.Desc_OreIron_C || limit) / limit : 0;
 }
+const OPTIMAL_TARGETS = {
+  raw: "原料消耗最少",
+  machines: "机器最少",
+  power: "耗电最少",
+  raws: "指定原料最少",
+};
 const PRIMARY_RAW = ["Desc_LiquidOil_C", "Desc_OreBauxite_C"];
 const OIL_FAMILY = ["Desc_Plastic_C", "Desc_Rubber_C", "Desc_PolymerResin_C", "Desc_HeavyOilResidue_C", "Desc_LiquidFuel_C", "Desc_PetroleumCoke_C", "Desc_LiquidTurboFuel_C"];
 const ALUMINUM_FAMILY = ["Desc_AluminaSolution_C", "Desc_AluminumScrap_C", "Desc_AluminumIngot_C", "Desc_AluminumPlate_C", "Desc_AluminumCasing_C", "Desc_Silica_C"];
@@ -4778,6 +4804,30 @@ function planSolve(
   return { ok: true, result, rs, pool, involved: [...involved], mode,
     routedEdges: s.routing?.enabled ? s.routing.edges.map((e, i) => ({ ...e, q: result['route-edge:' + i] || 0 })).filter(e => e.q > 1e-6) : null };
 }
+// Supply / reverse-demand checklist: one row per external material plus the target products.
+function supplyListRows(s = state) {
+  const plan = summarize(planSolve(demands(s), s, { mode: s.mode }), s);
+  if (!plan) return null;
+  const pool = supplyPool(s);
+  if (s.mode === "constrained") pool[s.inputConstraint.id] = s.inputConstraint.q;
+  const auto = (id) => s.mode === "constrained" && id !== s.inputConstraint.id;
+  const ids = [...new Set([...Object.keys(pool), ...Object.keys(plan.external).filter((id) => plan.external[id] > EPS)])];
+  const inputs = ids.map((id) => {
+    const supply = auto(id) ? null : pool[id] || 0, need = plan.external[id] || 0;
+    return { id, name: I[id]?.name || id, unit: isPowerItem(id) ? "MW" : I[id]?.fluid ? "m³/min" : "/min",
+      raw: !!I[id]?.raw, supply, need, diff: supply == null ? null : supply - need };
+  }).sort((a, b) => (b.raw - a.raw) || b.need - a.need);
+  const products = s.products.filter((p) => p.q > EPS).map((p) => ({ id: p.id, name: I[p.id]?.name || p.id, q: p.q }));
+  return { mode: s.mode, inputs, products, machines: plan.machines, power: plan.power };
+}
+function supplyListCsv(list) {
+  const n = (x) => (x == null ? "" : String(Math.round(x * 1000) / 1000)),
+    q = (x) => /[",\n]/.test(x) ? '"' + x.replace(/"/g, '""') + '"' : x;
+  const lines = [["类型", "物品", "ID", "单位", "当前供给", "产线需求", "差额"].join(",")];
+  for (const r of list.inputs) lines.push([r.raw ? "原料" : "外部物料", q(r.name), r.id, r.unit, r.supply == null ? "自动反推" : n(r.supply), n(r.need), n(r.diff)].join(","));
+  for (const p of list.products) lines.push(["产物", q(p.name), p.id, "/min", "", n(p.q), ""].join(","));
+  return "\ufeff" + lines.join("\r\n") + "\r\n";
+}
 function demands(s = state) {
   return Object.fromEntries(
     s.products.filter((p) => p.q > EPS).map((p) => [p.id, p.q]),
@@ -5070,20 +5120,31 @@ function rawResourceCost(plan) {
   for (const [id, q] of Object.entries(plan.external || {})) if (I[id]?.raw && q > EPS) cost += q * resourceWeight(id);
   return cost + plan.power * 1e-4;
 }
-// Reverse mode: choose the oil and aluminum recipes that use the least crude
-// oil and bauxite; among those, the least of the other (scarcity-weighted) raw
-// resources. All candidate recipes are solved together so byproduct loops
-// (residual plastic/rubber, recycled rubber/plastic, scrap water) count.
-function optimizeOilAluminum(s = state) {
+// Plan-level value of an optimisation target (lower is better).
+function targetCost(plan, target, raws = []) {
+  if (!plan) return Infinity;
+  if (target === "machines") return plan.machines;
+  if (target === "power") return plan.productionPower ?? plan.power;
+  if (target === "raws") return raws.reduce((a, id) => a + (plan.external?.[id] || 0) * (resourceWeight(id) || 1), 0);
+  return rawResourceCost(plan) - plan.power * 1e-4;
+}
+// Reverse mode: choose recipes that minimise the target, solving every
+// candidate recipe together so byproduct loops (residual plastic/rubber,
+// recycled rubber/plastic, scrap water, …) count. Stage 1 minimises the
+// target; stage 2 keeps that optimum and minimises scarcity-weighted raw
+// resources (or, for the raw target, machines). `family` limits which items
+// may change recipe (all items when omitted). Alternates follow the unlocked
+// list in Settings, or all alternates when none are ticked.
+function optimizeRecipes(s = state, opts = {}) {
+  const target = OPTIMAL_TARGETS[opts.target] ? opts.target : "raw",
+    raws = (opts.raws || []).filter((id) => I[id]?.raw);
   if (s.mode !== "reverse") return { ok: false, reason: "仅在“从产物反推”模式下可用。" };
+  if (target === "raws" && !raws.length) return { ok: false, reason: "请先选择要最少消耗的原料。" };
   const base = planSolve(demands(s), s, { mode: "reverse" }),
     before = summarize(base, s);
   if (!before) return { ok: false, reason: "当前方案不可行，先修正后再优化。" };
   const boundary = new Set(s.supplies.filter((x) => x.stop).map((x) => x.id)),
-    involved = new Set(base.involved),
-    family = [...OIL_FAMILY, ...ALUMINUM_FAMILY].filter((id) => involved.has(id) && !boundary.has(id));
-  if (!family.length) return { ok: false, reason: "当前方案没有石油或铝相关工序（或已作为外部供给起点）。" };
-  const unlocked = new Set(s.optimizationSettings?.alternates || []),
+    unlocked = new Set(s.optimizationSettings?.alternates || []),
     useAll = !unlocked.size,
     chosen = new Set(Object.values(s.selected || {}));
   const allowed = (k) => {
@@ -5091,43 +5152,75 @@ function optimizeOilAluminum(s = state) {
     return r?.kind === "machine" && !r.generation && !r.groupParent && r.b !== "Build_Packager_C" &&
       (s.event || !r.event) && (!r.alt || useAll || unlocked.has(k) || chosen.has(k));
   };
+  const familyIds = (opts.family || ITEM_IDS).filter((id) => !boundary.has(id) && !isPowerItem(id) && (OPTIONS[id] || []).some(allowed));
+  if (!familyIds.length) return { ok: false, reason: opts.emptyReason || "当前方案没有可以替换配方的工序。" };
   const rs = new Set(base.rs);
-  for (const id of family) for (const k of OPTIONS[id] || []) if (allowed(k)) rs.add(k);
+  for (const id of familyIds) for (const k of OPTIONS[id] || []) if (allowed(k)) rs.add(k);
   const demand = canonicalDemands(demands(s)),
     model = { optimize: "objective", opType: "min", constraints: {}, variables: {} },
     items = new Set(Object.keys(demand));
   for (const k of rs) for (const id of [...Object.keys(R[k].ins), ...Object.keys(R[k].outs)]) items.add(id);
   for (const id of items) model.constraints[id] = { min: demand[id] || 0 };
+  // A generous bound on total machine-equivalents keeps the simplex from
+  // reporting a large model as unbounded.
+  model.constraints.cap = { max: 1e7 };
+  // Per 100%-machine equivalent: machines and power at the configured clock.
+  const machinesPer = (k) => 100 / Math.max(1, machineClock(k, s)),
+    powerPer = (k) => {
+      const cap = Math.max(0.01, machineClock(k, s) / 100);
+      return (R[k].p || 0) * Math.pow(cap, (B[R[k].b]?.exp || 1.321929) - 1) * (amplification(k, s).boost ** 2) * s.powerMult;
+    };
+  const costs = {};
   for (const k of rs) {
     const rr = rates(k, s),
-      v = { objective: (R[k].p || 0) * 1e-4 + 1e-6 };
+      v = {};
     for (const [id, q] of Object.entries(rr.outs)) v[id] = (v[id] || 0) + q;
     for (const [id, q] of Object.entries(rr.ins)) v[id] = (v[id] || 0) - q;
+    v.cap = 1;
     model.variables[k] = v;
+    costs[k] = { machines: machinesPer(k), power: powerPer(k) };
   }
+  // Only raw resources and boundary supplies come from outside; every other
+  // item must be made by a recipe in the set (the current plan's recipes are
+  // always included, so this stays feasible).
+  const unproducible = new Set();
   for (const id of items) {
-    const produced = [...rs].some((k) => R[k].outs[id] > 0);
-    if (I[id]?.raw) model.variables["ext:" + id] = { objective: resourceWeight(id), [id]: 1 };
-    else if (boundary.has(id)) model.variables["ext:" + id] = { objective: 0, [id]: 1 };
-    else if (!produced) model.variables["ext:" + id] = { objective: 1e4, [id]: 1 };
+    if (I[id]?.raw || boundary.has(id)) model.variables["ext:" + id] = { [id]: 1 };
+    else if (![...rs].some((k) => R[k].outs[id] > 0)) {
+      unproducible.add(id);
+      model.variables["ext:" + id] = { [id]: 1 };
+    }
   }
-  // Stage 1: least crude oil + bauxite (unproducible items stay prohibitive).
-  const secondary = Object.fromEntries(Object.entries(model.variables).map(([k, v]) => [k, v.objective]));
-  for (const [k, v] of Object.entries(model.variables))
-    v.objective = k.startsWith("ext:") && PRIMARY_RAW.includes(k.slice(4)) ? resourceWeight(k.slice(4)) : secondary[k] >= 1e4 ? 1e4 : 0;
-  for (const id of PRIMARY_RAW) if (model.variables["ext:" + id]) model.variables["ext:" + id].primary = resourceWeight(id);
+  const forbidden = (k) => k.startsWith("ext:") && unproducible.has(k.slice(4));
+  const objective = (kind, k) => {
+    if (forbidden(k)) return 1e3;
+    if (k.startsWith("ext:")) {
+      const id = k.slice(4);
+      if (kind === "raw") return I[id]?.raw ? resourceWeight(id) : 0;
+      if (kind === "raws") return raws.includes(id) ? resourceWeight(id) || 1 : 0;
+      return 0;
+    }
+    if (kind === "machines") return costs[k].machines;
+    if (kind === "power") return costs[k].power;
+    return 0;
+  };
+  const tiny = (k) => (k.startsWith("ext:") ? 0 : 1e-4);
+  const secondaryKind = target === "raw" ? "machines" : "raw";
+  // Stage 1
+  for (const [k, v] of Object.entries(model.variables)) {
+    v.objective = objective(target, k) + tiny(k);
+    v.primary = forbidden(k) ? 0 : objective(target, k);
+  }
   const first = solver.Solve(model);
   if (!first?.feasible) return { ok: false, reason: "求解失败，保持原配方。" };
-  const best = PRIMARY_RAW.reduce((a, id) => a + (first["ext:" + id] || 0) * resourceWeight(id), 0);
-  // Stage 2: keep that minimum, then minimise everything else.
-  model.constraints.primary = { max: best * (1 + 1e-7) + 1e-7 };
-  for (const [k, v] of Object.entries(model.variables)) v.objective = secondary[k];
-  const result = solver.Solve(model);
-  if (!result?.feasible) return { ok: false, reason: "求解失败，保持原配方。" };
-  // Pick the dominant producer of each family item.
+  const best = Object.keys(model.variables).reduce((a, k) => a + (first[k] || 0) * model.variables[k].primary, 0);
+  // Stage 2: keep the optimum, then the secondary goal.
+  model.constraints.primary = { max: best * (1 + 1e-6) + 1e-6 };
+  for (const [k, v] of Object.entries(model.variables)) v.objective = objective(secondaryKind, k) + tiny(k);
+  const result = solver.Solve(model)?.feasible ? solver.Solve(model) : first;
+  // Pick the dominant producer of each item the optimum actually uses.
   const changes = [], mixed = [], next = copy(s);
-  for (const id of family) {
-    // Only items the optimum actually uses; pure byproducts keep their recipe.
+  for (const id of familyIds) {
     const used = (demand[id] || 0) + [...rs].reduce((a, k) => a + (result[k] || 0) * (rates(k, s).ins[id] || 0), 0);
     if (used < 1e-6) continue;
     const producers = [...rs]
@@ -5136,21 +5229,23 @@ function optimizeOilAluminum(s = state) {
       .sort((a, b) => b[1] - a[1]);
     if (!producers.length) continue;
     const total = producers.reduce((a, [, q]) => a + q, 0),
-      [best] = producers[0];
+      [bestRecipe] = producers[0];
     if (producers.length > 1 && producers[1][1] > total * 0.05) mixed.push(id);
-    if (recipeFor(id, s) !== best && OPTIONS[id]?.includes(best)) {
-      changes.push({ id, from: recipeFor(id, s), to: best });
-      next.selected[id] = best;
+    if (recipeFor(id, s) !== bestRecipe && OPTIONS[id]?.includes(bestRecipe)) {
+      changes.push({ id, from: recipeFor(id, s), to: bestRecipe });
+      next.selected[id] = bestRecipe;
     }
   }
   const after = summarize(planSolve(demands(next), next, { mode: "reverse" }), next),
-    primaryBefore = primaryRawCost(before),
-    primaryAfter = primaryRawCost(after),
-    costBefore = rawResourceCost(before),
-    costAfter = rawResourceCost(after);
-  const better = after && (primaryAfter < primaryBefore - 1e-6 || (primaryAfter <= primaryBefore + 1e-6 && costAfter < costBefore - 1e-6));
+    primaryBefore = targetCost(before, target, raws),
+    primaryAfter = targetCost(after, target, raws),
+    secBefore = targetCost(before, secondaryKind, raws),
+    secAfter = targetCost(after, secondaryKind, raws),
+    tol = Math.max(1e-6, Math.abs(primaryBefore) * 1e-6);
+  const better = after && (primaryAfter < primaryBefore - tol || (primaryAfter <= primaryBefore + tol && secAfter < secBefore - 1e-6));
+  const summary = (plan) => ({ machines: plan.machines, power: plan.power, rawCost: rawResourceCost(plan) - plan.power * 1e-4 });
   if (!changes.length || !better)
-    return { ok: true, applied: false, changes: [], costBefore, costAfter: costBefore, family, useAll };
+    return { ok: true, applied: false, changes: [], target, raws, useAll, before: summary(before) };
   s.selected = next.selected;
   const raw = {};
   for (const id of new Set([...Object.keys(before.external), ...Object.keys(after.external)]))
@@ -5158,9 +5253,26 @@ function optimizeOilAluminum(s = state) {
       const d = (after.external[id] || 0) - (before.external[id] || 0);
       if (Math.abs(d) > 1e-6) raw[id] = d;
     }
-  return { ok: true, applied: true, changes, mixed, costBefore, costAfter, raw, family, useAll, powerDelta: after.power - before.power,
-    oil: [before.external.Desc_LiquidOil_C || 0, after.external.Desc_LiquidOil_C || 0],
-    bauxite: [before.external.Desc_OreBauxite_C || 0, after.external.Desc_OreBauxite_C || 0] };
+  return {
+    ok: true, applied: true, changes, mixed, target, raws, useAll, raw,
+    before: summary(before), after: summary(after),
+    powerDelta: after.power - before.power,
+    picked: Object.fromEntries(raws.map((id) => [id, [before.external[id] || 0, after.external[id] || 0]])),
+  };
+}
+// Crude oil and bauxite first, oil and aluminum recipes only.
+function optimizeOilAluminum(s = state) {
+  const r = optimizeRecipes(s, {
+    target: "raws",
+    raws: PRIMARY_RAW,
+    family: [...OIL_FAMILY, ...ALUMINUM_FAMILY],
+    emptyReason: "当前方案没有石油或铝相关工序（或已作为外部供给起点）。",
+  });
+  if (r.picked) {
+    r.oil = r.picked.Desc_LiquidOil_C;
+    r.bauxite = r.picked.Desc_OreBauxite_C;
+  }
+  return r;
 }
 // Recommended handling for fluids that cannot be packaged or sunk.
 function fluidAdvice(id) {
@@ -10979,6 +11091,7 @@ function controls() {
   if ($("machineSort")) $("machineSort").value = state.machineSort;
   if ($("fillLastMachines")) $("fillLastMachines").hidden = state.mode !== "reverse";
   if ($("optimizeOilAl")) $("optimizeOilAl").hidden = state.mode !== "reverse";
+  if ($("optimalGroup")) $("optimalGroup").hidden = state.mode !== "reverse";
   for (const k of ["mode", "sort", "clockNum", "powerMult"])
     $(k).value = ["mode", "sort"].includes(k) ? state[k] : displayNumber(state[k === "clockNum" ? "clock" : k]);
   $("clock").max = $("clockNum").max = state.over ? 250 : 100;
@@ -11962,6 +12075,54 @@ function init() {
     state.powerMult = normalizeMultiplier(e.target.value);
     renderAll();
   };
+  // Optimal recipes across all items, with a chosen target.
+  const OPT_KEY = "factory-optimal-target";
+  let optPref = { target: "raw", raws: ["Desc_LiquidOil_C"] };
+  try {
+    const x = JSON.parse(localStorage.getItem(OPT_KEY) || "{}");
+    if (OPTIMAL_TARGETS[x.target]) optPref.target = x.target;
+    if (Array.isArray(x.raws)) optPref.raws = x.raws.filter((id) => I[id]?.raw);
+  } catch {}
+  const storeOpt = () => {
+    try { localStorage.setItem(OPT_KEY, JSON.stringify(optPref)); } catch {}
+  };
+  const rawChoices = [...new Set([...Object.keys(RESOURCE_LIMITS), "Desc_Water_C"])].filter((id) => I[id]?.raw)
+    .sort((a, b) => resourceWeight(b) - resourceWeight(a));
+  const renderOptRaws = () => {
+    $("optimalRawList").innerHTML = rawChoices.map((id) => `<label><input type="checkbox" data-opt-raw="${esc(id)}"${optPref.raws.includes(id) ? " checked" : ""}> ${esc(I[id].name)}</label>`).join("");
+    $("optimalRaws").querySelector("summary").textContent = optPref.raws.length ? optPref.raws.map((id) => I[id]?.name || id).join("、") : "选择原料";
+    $("optimalRaws").hidden = optPref.target !== "raws";
+  };
+  $("optimalTarget").value = optPref.target;
+  renderOptRaws();
+  $("optimalTarget").onchange = (e) => {
+    optPref.target = OPTIMAL_TARGETS[e.target.value] ? e.target.value : "raw";
+    storeOpt();
+    renderOptRaws();
+  };
+  $("optimalRawList").addEventListener("change", (e) => {
+    const id = e.target.dataset?.optRaw;
+    if (!id) return;
+    optPref.raws = e.target.checked ? [...new Set([...optPref.raws, id])] : optPref.raws.filter((x) => x !== id);
+    storeOpt();
+    $("optimalRaws").querySelector("summary").textContent = optPref.raws.length ? optPref.raws.map((x) => I[x]?.name || x).join("、") : "选择原料";
+  });
+  document.addEventListener("click", (e) => {
+    if ($("optimalRaws").open && !e.target.closest("#optimalRaws")) $("optimalRaws").open = false;
+    if ($("supplyListMenu").open && !e.target.closest("#supplyListMenu")) $("supplyListMenu").open = false;
+  });
+  $("optimizeAll").onclick = () => {
+    const r = optimizeRecipes(state, { target: optPref.target, raws: optPref.raws });
+    renderAll();
+    if (!r.ok) return setStatus(r.reason, true);
+    const scope = r.useAll ? "全部替代配方（设置中未勾选已解锁替代配方）" : "已解锁替代配方",
+      goal = r.target === "raws" ? `${optPref.raws.map((id) => I[id]?.name || id).join("、")}最少` : OPTIMAL_TARGETS[r.target];
+    if (!r.applied) return setStatus(`当前配方已是“${goal}”的最优组合（按${scope}比较）。`);
+    const list = r.changes.slice(0, 8).map((c) => `${I[c.id]?.name || c.id} → ${R[c.to]?.name || c.to}`).join("；") + (r.changes.length > 8 ? `；等共 ${r.changes.length} 项` : "");
+    const pair = (a, b, unitText = "") => `${fmt(a)} → ${fmt(b)}${unitText}`;
+    const picked = r.target === "raws" ? Object.entries(r.picked).map(([id, [a, b]]) => `${I[id]?.name || id} ${pair(a, b)}`).join("，") + "；" : "";
+    setStatus(`已按“${goal}”换成最优配方（${scope}）：${list}。${picked}机器 ${pair(r.before.machines, r.after.machines, " 台")}，耗电 ${pair(r.before.power, r.after.power, " MW")}，原料加权消耗 ${pair(r.before.rawCost, r.after.rawCost)}。${r.mixed.length ? "最优解有 " + r.mixed.length + " 种物品混用多种配方，已选主要的一种。" : ""}可撤销。`);
+  };
   $("optimizeOilAl").onclick = () => {
     const r = optimizeOilAluminum();
     renderAll();
@@ -12038,6 +12199,38 @@ function init() {
     state = fresh();
     renderAll();
     setStatus("当前方案已清空，已保存方案和已有产线基准保留。");
+  };
+  const supplyListOrWarn = () => {
+    const list = supplyListRows(state);
+    if (!list) setStatus("当前方案无法求解，先处理缺料再拉清单。", true);
+    return list;
+  };
+  $("copySupplyList").onclick = async () => {
+    $("supplyListMenu").open = false;
+    const list = supplyListOrWarn();
+    if (!list) return;
+    const modeText = { forward: "按现有供给分配", reverse: "从产物反推", constrained: "单输入约束" }[list.mode] || list.mode;
+    const line = (r) => `- ${r.name}：需求 ${fmt(r.need)} ${unit(r.id)}` + (r.supply == null ? "（自动反推）" : list.mode === "reverse" && r.supply < EPS ? "" : `，供给 ${fmt(r.supply)}，差额 ${r.diff < -EPS ? "缺 " + fmt(-r.diff) : fmt(r.diff)}`);
+    const raws = list.inputs.filter((r) => r.raw), others = list.inputs.filter((r) => !r.raw);
+    const text = [`【${workshop.active?.name || "当前方案"}】供给清单 · ${modeText}`,
+      ...(raws.length ? ["原料：", ...raws.map(line)] : []),
+      ...(others.length ? ["其他外部物料：", ...others.map(line)] : []),
+      ...(list.products.length ? ["产物：", ...list.products.map((p) => `- ${p.name} ${fmt(p.q)} ${unit(p.id)}`)] : []),
+      `机器 ${fmt(list.machines)} 台 · 耗电 ${fmt(list.power)} MW`].join("\n");
+    try {
+      await navigator.clipboard.writeText(text);
+      setStatus(`已复制供给清单（${list.inputs.length} 项外部物料，${list.products.length} 项产物）。`);
+    } catch {
+      prompt("复制下面的清单：", text);
+    }
+  };
+  $("csvSupplyList").onclick = () => {
+    $("supplyListMenu").open = false;
+    const list = supplyListOrWarn();
+    if (!list) return;
+    const name = (workshop.active?.name || "plan").replace(/[\\/:*?"<>|]+/g, "_");
+    download(`${name}-供给清单.csv`, supplyListCsv(list), "text/csv;charset=utf-8");
+    setStatus("已下载供给清单 CSV。");
   };
   $("exportBill").onclick = () => {
     const bill = constructionPlan();
@@ -12426,6 +12619,7 @@ Object.assign(EN_UI, {
   "打开后，标签栏每个方案一页，点“＋”新建空白规划页，方案列表的“载入”会在新页打开。各页的未保存修改分别保留，刷新后仍在。": "When on, each plan gets its own tab; “＋” opens a blank planner page and “Load” in the plan list opens a new page. Each page keeps its own unsaved edits, also after a reload.",
   "导出当前方案": "Export current plan", "导出": "Export", "导入并合并": "Import & merge", "保存": "Save",
   "石油 / 铝最优配方": "Optimal oil / aluminum recipes",
+  "全配方最优": "Optimize all recipes", "拉清单": "Checklist", "复制文字清单": "Copy as text", "下载 CSV 表格": "Download CSV", "原料消耗最少": "Least raw resources", "机器最少": "Fewest machines", "耗电最少": "Least power", "指定原料最少": "Least of chosen resources", "选择原料": "Choose resources", "最优目标": "Optimization target",
   "按里程碑解锁": "By milestone unlock", "按产线上下游": "By flow order", "排序": "Sort", "回收站": "Sink",
 });
 const languagePattern = new RegExp(
