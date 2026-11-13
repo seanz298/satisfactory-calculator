@@ -114,6 +114,58 @@ function fresh() {
     rail: freshRail(),
     progress: freshProgress(),
     map: freshMap(),
+    layout: freshLayout(),
+  };
+}
+// Factory floor layout (Axure-style canvas). Units are metres; x/y is the top-left of the rotated box.
+function freshLayout() {
+  return { pages: [{ id: "p1", name: "1F", objects: [], groups: [] }], page: "p1", snap: 1, guides: true };
+}
+function normalizeLayout(x) {
+  const LAYOUT_TYPES = ["machine", "foundation", "rect", "note", "text", "link"];
+  const base = freshLayout();
+  if (!x || typeof x !== "object" || !Array.isArray(x.pages) || !x.pages.length) return base;
+  const num = (v, lo, hi, d = 0) => (Number.isFinite(+v) ? Math.min(hi, Math.max(lo, +v)) : d);
+  const str = (v, n) => (typeof v === "string" ? v.slice(0, n) : "");
+  const ids = new Set();
+  const pages = x.pages.slice(0, 50).map((p, i) => {
+    let pid = str(p?.id, 40) || "p" + (i + 1);
+    while (ids.has(pid)) pid += "_";
+    ids.add(pid);
+    const groups = (Array.isArray(p?.groups) ? p.groups : []).slice(0, 5000)
+      .filter((g) => g && typeof g.id === "string")
+      .map((g) => ({ id: g.id.slice(0, 40), name: str(g.name, 120) || "组合" }));
+    const gids = new Set(groups.map((g) => g.id)), oids = new Set();
+    const objects = [];
+    for (const o of (Array.isArray(p?.objects) ? p.objects : []).slice(0, 20000)) {
+      if (!o || !LAYOUT_TYPES.includes(o.type) || typeof o.id !== "string" || oids.has(o.id)) continue;
+      const n = {
+        id: o.id.slice(0, 40), type: o.type,
+        x: num(o.x, -1e5, 1e5), y: num(o.y, -1e5, 1e5),
+        w: num(o.w, 0.5, 4000, 8), h: num(o.h, 0.5, 4000, 8),
+        rot: [0, 90, 180, 270].includes(+o.rot) ? +o.rot : 0,
+        name: str(o.name, 120), text: str(o.text, 2000),
+        color: /^#[0-9a-f]{6}$/i.test(o.color || "") ? o.color : "",
+        locked: !!o.locked, hidden: !!o.hidden,
+        group: gids.has(o.group) ? o.group : null,
+      };
+      if (o.type === "machine") {
+        n.b = str(o.b, 80);
+        n.k = R[o.k]?.kind === "machine" ? o.k : null;
+      }
+      if (o.type === "link") { n.from = str(o.from, 40); n.to = str(o.to, 40); }
+      oids.add(n.id);
+      objects.push(n);
+    }
+    const valid = objects.filter((o) => o.type !== "link" || (oids.has(o.from) && oids.has(o.to) && o.from !== o.to));
+    const used = new Set(valid.map((o) => o.group).filter(Boolean));
+    return { id: pid, name: str(p?.name, 60) || i + 1 + "F", objects: valid, groups: groups.filter((g) => used.has(g.id)) };
+  });
+  return {
+    pages,
+    page: pages.some((p) => p.id === x.page) ? x.page : pages[0].id,
+    snap: [0, 0.5, 1, 2, 4, 8].includes(+x.snap) ? +x.snap : 1,
+    guides: x.guides !== false,
   };
 }
 let state = fresh();
@@ -4925,6 +4977,7 @@ const UI_PAGES = {
   home: ["首页", "home"],
   planner: ["产线规划", "factory"],
   graph: ["产线图与思维导图", "network"],
+  layout: ["工厂布局", "layers"],
   construction: ["物流与施工", "build"],
   workspace: ["方案与改装", "folder"],
   worldmap: ["交互式地图", "map"],
@@ -5021,6 +5074,7 @@ function renderHome() {
     progress: "查找阶段物资，记录库存与提交进度。",
     catalog: "按中英文和拼音搜索，查看图片与配方。",
     workspace: "保存方案，对比已有产线与改装清单。",
+    layout: "按真实占地拖放机器，网格吸附、对齐、分组和楼层。",
   };
   $("homeLinks").innerHTML = Object.entries(desc)
     .map(
@@ -5223,7 +5277,7 @@ function initInterface() {
     navButton("planner") +
     group(
       "产线工具",
-      ["graph", "rail", "construction", "workspace"]
+      ["graph", "layout", "rail", "construction", "workspace"]
         .map((k) => navButton(k))
         .join(""),
     ) +
@@ -6803,6 +6857,7 @@ function safeState(x) {
   );
   s.routing = { enabled: !!x.routing?.enabled, edges: Array.isArray(x.routing?.edges) ? x.routing.edges.filter(e => typeof e?.from === 'string' && typeof e?.to === 'string' && !!I[e.item] && (e.limit == null || (Number.isFinite(e.limit) && e.limit >= 0))).slice(0, 2000).map(e => ({from:e.from,to:e.to,item:e.item,limit:e.limit == null ? null : amount(e.limit)})) : [] };
   s.rail = normalizeRail(x.rail);
+  s.layout = normalizeLayout(x.layout);
   s.sloops = Object.fromEntries(
     Object.entries(x.sloops || {})
       .filter(
@@ -7334,6 +7389,7 @@ function renderAll() {
   renderResults();
   syncMapUI();
   if (!$("progressTab").hidden) renderProgress();
+  if ($("layoutTab") && !$("layoutTab").hidden && typeof renderLayout === "function") renderLayout();
   save();
 }
 function switchTab(tab) {
@@ -7350,6 +7406,7 @@ function switchTab(tab) {
     "journal",
     "rail",
     "settings",
+    "layout",
   ])
     $(t + "Tab").hidden = t !== tab;
   document
@@ -7358,6 +7415,7 @@ function switchTab(tab) {
   if (typeof interfaceNavigate === "function") interfaceNavigate(tab);
   if (tab === "settings") renderMultiplierSettings();
   if (tab === "rail") renderRail();
+  if (tab === "layout" && typeof renderLayout === "function") renderLayout();
   if (tab === "graph") renderGraph();
   if (tab === "progress") renderProgress();
   if (tab === "catalog") renderCatalog();
@@ -8489,7 +8547,8 @@ Object.assign(EN_UI, {
   "打开后，标签栏每个方案一页，点“＋”新建空白规划页，方案列表的“载入”会在新页打开。各页的未保存修改分别保留，刷新后仍在。": "When on, each plan gets its own tab; “＋” opens a blank planner page and “Load” in the plan list opens a new page. Each page keeps its own unsaved edits, also after a reload.",
   "导出当前方案": "Export current plan", "导出": "Export", "导入并合并": "Import & merge", "保存": "Save",
   "石油 / 铝最优配方": "Optimal oil / aluminum recipes",
-  "全配方最优": "Optimize all recipes", "拉清单": "Checklist", "复制文字清单": "Copy as text", "下载 CSV 表格": "Download CSV", "原料消耗最少": "Least raw resources", "机器最少": "Fewest machines", "耗电最少": "Least power", "指定原料最少": "Least of chosen resources", "选择原料": "Choose resources", "最优目标": "Optimization target",
+  "全配方最优": "Optimize all recipes",
+  "工厂布局": "Factory layout", "按真实占地拖放机器，网格吸附、对齐、分组和楼层。": "Place machines at their real footprint with grid snapping, alignment, groups and floors.", "平移": "Pan", "连线": "Link", "吸附": "Snap", "关": "Off", "8 m 地基": "8 m foundation", "对齐线": "Smart guides", "⟳ 旋转": "⟳ Rotate", "旋转": "Rotation", "组合": "Group", "取消组合": "Ungroup", "锁定": "Lock", "解锁": "Unlock", "置顶": "To front", "置底": "To back", "适应": "Fit", "自动排布": "Auto layout", "每排最多": "Max per row", "排间通道": "Aisle", "只放未放置的": "Only unplaced machines", "生成物流连线": "Create flow links", "先清空当前页": "Clear this page first", "开始排布": "Run", "当前页 PNG": "This page as PNG", "当前页 SVG": "This page as SVG", "部件库": "Library", "检视": "Inspector", "页面 / 楼层": "Pages / floors", "本方案": "This plan", "地基与标注": "Foundations & notes", "建筑": "Buildings", "图层": "Layers", "拖到画布，或点击放到视图中央。": "Drag onto the canvas, or click to place it at the view centre.", "未选中对象。": "Nothing selected.", "页面名称": "Page name", "单位：米。8 m = 1 块地基。机器尺寸取自游戏百科，箭头指向出料面。": "Units are metres; 8 m = one foundation. Machine sizes come from the game wiki; the arrow points to the output side.", "快捷键：V 选择 · H 平移 · L 连线 · R 旋转 · Ctrl+G 组合 · Ctrl+D 复制 · 方向键微调（Shift 为 8 m）。": "Shortcuts: V select · H pan · L link · R rotate · Ctrl+G group · Ctrl+D duplicate · arrow keys nudge (Shift = 8 m).", "机器": "Machine", "地基": "Foundation", "区域": "Zone", "便签": "Sticky note", "文字": "Text", "X / m": "X / m", "Y / m": "Y / m", "宽 / m": "Width / m", "长 / m": "Length / m", "颜色": "Colour", "文本": "Text", "隐藏": "Hidden", "默认颜色": "Default colour", "反转方向": "Reverse direction", "起点": "From", "终点": "To", "标签": "Label", "占地": "Footprint", "输入": "Inputs", "输出": "Outputs", "宽": "Width", "长": "Length", "地基 8×8": "Foundation 8×8", "地基 8×4": "Foundation 8×4", "地基 8×2": "Foundation 8×2", "备注": "Note", "标题": "Title", "已放": "placed", "本页": "This page", "方案已放置": "Plan placed", "选中": "Selected", "空格 + 拖动平移 · Ctrl + 滚轮缩放 · Alt 拖动不吸附": "Space + drag to pan · Ctrl + wheel to zoom · Alt-drag skips snapping", "点击目标对象完成连线 · Esc 取消": "Click the target to finish the link · Esc cancels", "点击起点对象": "Click the start object", "当前方案没有机器。先在“产线规划”设置产物，或使用“建筑”页签放置空白建筑。": "The current plan has no machines. Set products in the planner, or place plain buildings from the Buildings tab.", "本页还没有对象。": "This page is empty.", "副本": "copy", "已按配方自动排布": "Laid out by recipe:", "组机器": " machine groups", "条物流连线": " flow links", "可撤销": "Undo is available", "当前方案没有可排布的机器。先在产线规划里设置产物。": "The current plan has no machines to lay out. Set products in the planner first.", "当前页没有可导出的对象。": "This page has nothing to export.", "已导出当前页 SVG。": "Exported this page as SVG.", "已导出当前页 PNG。": "Exported this page as PNG.", "PNG 导出失败，请改用 SVG。": "PNG export failed; use SVG instead.", "已放置": "Placed", "左对齐": "Align left", "水平居中": "Align centre", "右对齐": "Align right", "顶对齐": "Align top", "垂直居中": "Align middle", "底对齐": "Align bottom", "水平等距分布（3 个以上）": "Distribute horizontally (3 or more)", "垂直等距分布（3 个以上）": "Distribute vertically (3 or more)", "布局画布": "Layout canvas", "分流器": "Conveyor Splitter", "合流器": "Conveyor Merger", "存储箱": "Storage Container", "工业存储箱": "Industrial Storage Container", "AWESOME回收站": "AWESOME Sink", "新建页面": "New page", "复制当前页": "Duplicate page", "删除当前页": "Delete page", "双击重命名": "Double-click to rename", "显示 / 隐藏": "Show / hide", "锁定 / 解锁": "Lock / unlock", "拉清单": "Checklist", "复制文字清单": "Copy as text", "下载 CSV 表格": "Download CSV", "原料消耗最少": "Least raw resources", "机器最少": "Fewest machines", "耗电最少": "Least power", "指定原料最少": "Least of chosen resources", "选择原料": "Choose resources", "最优目标": "Optimization target",
   "按里程碑解锁": "By milestone unlock", "按产线上下游": "By flow order", "排序": "Sort", "回收站": "Sink",
 });
 const languagePattern = new RegExp(

@@ -15,6 +15,7 @@ It is a single static web page: no backend, no account, no installation. Plans a
 | --- | --- |
 | Production planning | Plan forward from supplies, reverse-plan from target products, or limit output by one input; lock targets and pick alternate recipes |
 | Optimal recipes | In reverse mode, compare every recipe for every item and switch to the best mix for least raw resources, fewest machines, least power, or least of chosen resources; a one-click oil / aluminum preset is kept |
+| Factory layout | Axure-style canvas: place machines at their real footprint, grid snapping and smart guides, rulers, align / distribute, groups, layers, floors, notes and links, PNG / SVG export |
 | Supply checklist | Copy the external supply / reverse demand list as text, or download it as CSV |
 | Machines and clocks | Machines sorted by milestone unlock (or flow order), per-machine clocks, Somersloops, Power Shards, and a one-click “fill last machines” that rounds every last machine up to full clock |
 | Byproducts and fluids | Send leftovers to the AWESOME Sink (sinks, power and points are counted), set them as products, or add a downstream product; fluids are packaged into solids; recycle loops show circulation and the cheapest priming point |
